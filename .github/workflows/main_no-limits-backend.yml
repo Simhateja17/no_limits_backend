@@ -1,0 +1,77 @@
+# Docs for the Azure Web Apps Deploy action: https://github.com/Azure/webapps-deploy
+# More GitHub Actions for Azure: https://github.com/Azure/actions
+
+name: Build and deploy Node.js app to Azure Web App - no-limits-backend
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read #This is required for actions/checkout
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js version
+        uses: actions/setup-node@v3
+        with:
+          node-version: '22.x'
+
+      - name: npm install and build
+        env:
+          DATABASE_URL: "postgresql://postgres:password@localhost:5432/mydb?schema=public"
+        run: |
+          npm install
+          npm run build
+          echo "=== Verifying dist folder ==="
+          ls -la dist/
+
+      - name: Prepare deployment package
+        run: |
+          # Remove dist from .gitignore temporarily so it gets uploaded
+          sed -i '/^dist\/$/d' .gitignore
+          # Also remove node_modules line to include dependencies
+          sed -i '/^node_modules\/$/d' .gitignore
+          echo "=== Updated .gitignore ==="
+          cat .gitignore
+
+      - name: Upload artifact for deployment job
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-app
+          path: .
+          include-hidden-files: true
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      id-token: write #This is required for requesting the JWT
+      contents: read #This is required for actions/checkout
+
+    steps:
+      - name: Download artifact from build job
+        uses: actions/download-artifact@v4
+        with:
+          name: node-app
+
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_CB1C846BFE5F42C18A2234B5F1F223A7 }}
+          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_1045089600BB4B31A31F211DBA2941B5 }}
+          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_E5DCB6FB3A93490B9DD5DB7656D875DB }}
+
+      - name: 'Deploy to Azure Web App'
+        id: deploy-to-webapp
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: 'no-limits-backend'
+          slot-name: 'Production'
+          package: .

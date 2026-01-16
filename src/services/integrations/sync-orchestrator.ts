@@ -1,0 +1,1535 @@
+/**
+ * Sync Orchestrator Service
+ * Coordinates data synchronization between e-commerce platforms (Shopify/WooCommerce),
+ * local database, and JTL FFN fulfillment system
+ * 
+ * Flow: Shopify/WooCommerce → No-Limits DB → JTL FFN
+ */
+
+import { PrismaClient, ChannelType, OrderStatus, ReturnStatus } from '@prisma/client';
+import { ShopifyService } from './shopify.service.js';
+import { createShopifyServiceAuto, ShopifyServiceInstance } from './shopify-service-factory.js';
+import { WooCommerceService } from './woocommerce.service.js';
+import { JTLService } from './jtl.service.js';
+import { getEncryptionService } from '../encryption.service.js';
+import BatchOperations from './batch-utils.js';
+import ProductCache from './product-cache.js';
+import {
+  ShopifyOrder,
+  ShopifyProduct,
+  ShopifyRefund,
+  WooCommerceOrder,
+  WooCommerceProduct,
+  WooCommerceRefund,
+  JTLOutbound,
+  JTLProduct,
+  JTLReturn,
+  JTLAddress,
+  SyncResult,
+  SyncItemResult,
+  ShopifyLineItem,
+  WooCommerceLineItem,
+  ShopifyRefundLineItem,
+} from './types.js';
+
+interface SyncConfig {
+  channelId: string;
+  channelType: ChannelType;
+  shopifyCredentials?: {
+    shopDomain: string;
+    accessToken: string;
+  };
+  wooCommerceCredentials?: {
+    url: string;
+    consumerKey: string;
+    consumerSecret: string;
+  };
+  jtlCredentials: {
+    clientId: string;
+    clientSecret: string;
+    accessToken?: string;
+    refreshToken?: string;
+    environment: 'sandbox' | 'production';
+  };
+  jtlWarehouseId: string;
+  jtlFulfillerId: string;
+}
+
+interface ProductSyncData {
+  localProductId: string;
+  externalProductId: string;
+  sku: string;
+  name: string;
+  gtin?: string;
+  weight?: number;
+  imageUrl?: string;
+}
+
+interface OrderSyncData {
+  localOrderId: string;
+  externalOrderId: string;
+  orderNumber: string;
+  items: {
+    sku: string;
+    quantity: number;
+    jtlJfsku?: string;
+  }[];
+  shippingAddress: JTLAddress;
+  customerEmail?: string;
+}
+
+export class SyncOrchestrator {
+  private prisma: PrismaClient;
+  private shopifyService?: ShopifyServiceInstance;
+  private wooCommerceService?: WooCommerceService;
+  private jtlService: JTLService;
+  private config: SyncConfig;
+  private batchOps: BatchOperations;
+  private productCache?: ProductCache;
+
+  constructor(prisma: PrismaClient, config: SyncConfig) {
+    this.prisma = prisma;
+    this.config = config;
+    this.batchOps = new BatchOperations(prisma);
+
+    console.log('[SyncOrchestrator] Constructor - Config check:', {
+      channelType: config.channelType,
+      hasShopifyCredentials: !!config.shopifyCredentials,
+      hasWooCredentials: !!config.wooCommerceCredentials,
+      shopifyShopDomain: config.shopifyCredentials?.shopDomain,
+    });
+
+    // Initialize e-commerce service based on channel type
+    if (config.channelType === 'SHOPIFY' && config.shopifyCredentials) {
+      console.log('[SyncOrchestrator] Initializing ShopifyService (auto-select REST/GraphQL)');
+      this.shopifyService = createShopifyServiceAuto(config.shopifyCredentials);
+    } else if (config.channelType === 'WOOCOMMERCE' && config.wooCommerceCredentials) {
+      console.log('[SyncOrchestrator] Initializing WooCommerceService');
+      this.wooCommerceService = new WooCommerceService(config.wooCommerceCredentials);
+    } else {
+      console.log('[SyncOrchestrator] ⚠️ NO E-COMMERCE SERVICE INITIALIZED!');
+    }
+
+    // Initialize JTL service with decrypted tokens
+    const encryptionService = getEncryptionService();
+    const decryptedCredentials = {
+      ...config.jtlCredentials,
+      clientSecret: config.jtlCredentials.clientSecret
+        ? encryptionService.decrypt(config.jtlCredentials.clientSecret)
+        : config.jtlCredentials.clientSecret,
+      accessToken: config.jtlCredentials.accessToken
+        ? encryptionService.decrypt(config.jtlCredentials.accessToken)
+        : config.jtlCredentials.accessToken,
+      refreshToken: config.jtlCredentials.refreshToken
+        ? encryptionService.decrypt(config.jtlCredentials.refreshToken)
+        : config.jtlCredentials.refreshToken,
+    };
+    this.jtlService = new JTLService(decryptedCredentials);
+  }
+
+  // ============= PRODUCTS SYNC =============
+
+  /**
+   * Full sync of products from e-commerce platform → DB → JTL
+   */
+  async syncProducts(): Promise<SyncResult> {
+    const results: SyncItemResult[] = [];
+    let itemsProcessed = 0;
+    let itemsFailed = 0;
+
+    try {
+      // Step 1: Pull products from e-commerce platform
+      const externalProducts = await this.pullProductsFromChannel();
+
+      // Step 2: Store/update in local database
+      for (const product of externalProducts) {
+        try {
+          const localProduct = await this.upsertProductInDB(product);
+
+          // Step 3: Push to JTL FFN
+          const jtlProduct = await this.pushProductToJTL(localProduct);
+          if (jtlProduct) {
+            await this.updateProductJTLMapping(localProduct.localProductId, jtlProduct.jfsku);
+          }
+
+          results.push({
+            externalId: product.externalProductId,
+            localId: localProduct.localProductId,
+            success: true,
+            action: 'updated',
+          });
+          itemsProcessed++;
+        } catch (error) {
+          results.push({
+            externalId: product.externalProductId,
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error',
+            action: 'failed',
+          });
+          itemsFailed++;
+        }
+      }
+
+      return {
+        success: itemsFailed === 0,
+        syncedAt: new Date(),
+        itemsProcessed,
+        itemsFailed,
+        details: results,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+        syncedAt: new Date(),
+        itemsProcessed,
+        itemsFailed,
+      };
+    }
+  }
+
+  /**
+   * Incremental sync of products updated since last sync
+   */
+  async syncProductsIncremental(since: Date): Promise<SyncResult> {
+    const results: SyncItemResult[] = [];
+    let itemsProcessed = 0;
+    let itemsFailed = 0;
+
+    try {
+      const externalProducts = await this.pullProductsFromChannel(since);
+
+      for (const product of externalProducts) {
+        try {
+          const localProduct = await this.upsertProductInDB(product);
+
+          // Push to JTL FFN
+          const jtlProduct = await this.pushProductToJTL(localProduct);
+          if (jtlProduct) {
+            await this.updateProductJTLMapping(localProduct.localProductId, jtlProduct.jfsku);
+          }
+
+          results.push({
+            externalId: product.externalProductId,
+            localId: localProduct.localProductId,
+            success: true,
+            action: 'updated',
+          });
+          itemsProcessed++;
+        } catch (error) {
+          results.push({
+            externalId: product.externalProductId,
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error',
+            action: 'failed',
+          });
+          itemsFailed++;
+        }
+      }
+
+      return {
+        success: itemsFailed === 0,
+        syncedAt: new Date(),
+        itemsProcessed,
+        itemsFailed,
+        details: results,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+        syncedAt: new Date(),
+        itemsProcessed,
+        itemsFailed,
+      };
+    }
+  }
+
+  /**
+   * Pull products from the configured e-commerce channel
+   */
+  private async pullProductsFromChannel(since?: Date): Promise<ProductSyncData[]> {
+    const products: ProductSyncData[] = [];
+
+    console.log('[pullProductsFromChannel] Config check:', {
+      channelType: this.config.channelType,
+      hasShopifyService: !!this.shopifyService,
+      hasWooService: !!this.wooCommerceService,
+      since: since?.toISOString(),
+    });
+
+    if (this.config.channelType === 'SHOPIFY' && this.shopifyService) {
+      console.log('[pullProductsFromChannel] Calling Shopify API...');
+
+      let shopifyProducts: any[];
+      try {
+        shopifyProducts = since
+          ? await this.shopifyService.getProductsUpdatedSince(since)
+          : await this.shopifyService.getAllProducts();
+
+        console.log(`[pullProductsFromChannel] ✅ Shopify returned ${shopifyProducts.length} products`);
+      } catch (error) {
+        console.error('[pullProductsFromChannel] ❌ ERROR calling Shopify API:', error);
+        throw error;
+      }
+
+      for (const product of shopifyProducts) {
+        // Process each variant as a separate product
+        for (const variant of product.variants) {
+          products.push({
+            localProductId: '', // Will be set after DB insert
+            externalProductId: String(variant.id),
+            sku: variant.sku || `SHOP-${variant.id}`,
+            name: `${product.title}${variant.title !== 'Default Title' ? ` - ${variant.title}` : ''}`,
+            gtin: variant.barcode || undefined,
+            weight: variant.weight,
+            imageUrl: product.images[0]?.src,
+          });
+        }
+      }
+    } else if (this.config.channelType === 'WOOCOMMERCE' && this.wooCommerceService) {
+      const wooProducts = since
+        ? await this.wooCommerceService.getProductsUpdatedSince(since)
+        : await this.wooCommerceService.getAllProducts();
+
+      for (const product of wooProducts) {
+        products.push({
+          localProductId: '',
+          externalProductId: String(product.id),
+          sku: product.sku || `WOO-${product.id}`,
+          name: product.name,
+          gtin: undefined, // WooCommerce doesn't have GTIN by default
+          weight: product.weight ? parseFloat(product.weight) : undefined,
+          imageUrl: product.images[0]?.src,
+        });
+
+        // Handle variable products
+        if (product.variations && product.variations.length > 0) {
+          const variations = await this.wooCommerceService.getProductVariations(product.id);
+          for (const variation of variations) {
+            products.push({
+              localProductId: '',
+              externalProductId: String(variation.id),
+              sku: variation.sku || `WOO-VAR-${variation.id}`,
+              name: `${product.name} - ${variation.name}`,
+              weight: variation.weight ? parseFloat(variation.weight) : undefined,
+              imageUrl: variation.images?.[0]?.src || product.images[0]?.src,
+            });
+          }
+        }
+      }
+    }
+
+    return products;
+  }
+
+  /**
+   * Upsert product in local database
+   */
+  private async upsertProductInDB(productData: ProductSyncData): Promise<ProductSyncData> {
+    // Get client ID from channel first (needed for proper filtering)
+    const channel = await this.prisma.channel.findUnique({
+      where: { id: this.config.channelId },
+    });
+
+    if (!channel) {
+      throw new Error(`Channel ${this.config.channelId} not found`);
+    }
+
+    // Find existing product by SKU AND clientId (each client has their own products)
+    const existingProduct = await this.prisma.product.findFirst({
+      where: {
+        clientId: channel.clientId, // Important: Filter by client!
+        OR: [
+          { sku: productData.sku },
+          {
+            channels: {
+              some: {
+                channelId: this.config.channelId,
+                externalProductId: productData.externalProductId,
+              },
+            },
+          },
+        ],
+      },
+      include: { channels: true },
+    });
+
+    if (existingProduct) {
+      // Update existing product
+      await this.prisma.product.update({
+        where: { id: existingProduct.id },
+        data: {
+          name: productData.name,
+          sku: productData.sku,
+          gtin: productData.gtin,
+          updatedAt: new Date(),
+        },
+      });
+
+      // Upsert product channel mapping
+      await this.prisma.productChannel.upsert({
+        where: {
+          productId_channelId: {
+            productId: existingProduct.id,
+            channelId: this.config.channelId,
+          },
+        },
+        create: {
+          productId: existingProduct.id,
+          channelId: this.config.channelId,
+          externalProductId: productData.externalProductId,
+          isActive: true,
+        },
+        update: {
+          externalProductId: productData.externalProductId,
+          isActive: true,
+          updatedAt: new Date(),
+        },
+      });
+
+      return { ...productData, localProductId: existingProduct.id };
+    } else {
+      // Create new product (channel was already fetched above)
+      const newProduct = await this.prisma.product.create({
+        data: {
+          clientId: channel.clientId,
+          productId: productData.sku, // Use SKU as productId
+          name: productData.name,
+          sku: productData.sku,
+          gtin: productData.gtin,
+          isActive: true,
+          channels: {
+            create: {
+              channelId: this.config.channelId,
+              externalProductId: productData.externalProductId,
+              isActive: true,
+            },
+          },
+        },
+      });
+
+      return { ...productData, localProductId: newProduct.id };
+    }
+  }
+
+  /**
+   * Push product to JTL FFN
+   */
+  private async pushProductToJTL(productData: ProductSyncData): Promise<{ jfsku: string } | null> {
+    try {
+      // Build identifier object (matches n8n workflow structure)
+      const identifier: { ean?: string | null; han?: string | null } = {
+        ean: productData.gtin || productData.sku || null,
+        han: null,
+      };
+
+      // Build attributes array for platform tracking
+      const attributes = [
+        {
+          key: 'platform',
+          value: this.config.channelType, // Use channel type from config
+        },
+        {
+          key: 'externalProductId',
+          value: productData.externalProductId || '',
+        },
+      ];
+
+      const jtlProduct: JTLProduct = {
+        name: productData.name,
+        merchantSku: productData.sku,
+        identifier: identifier, // Singular object (not array)
+        weight: productData.weight ? productData.weight / 1000 : 0.1, // Convert grams to kg, default 0.1
+        length: 0.01, // Default 1cm in meters
+        width: 0.01,
+        height: 0.01,
+        imageUrl: productData.imageUrl,
+        attributes: attributes,
+        condition: 'Default',
+      };
+
+      const result = await this.jtlService.createProduct(jtlProduct);
+      return { jfsku: result.jfsku };
+    } catch (error) {
+      console.error(`Failed to push product ${productData.sku} to JTL:`, error);
+      return null;
+    }
+  }
+
+  /**
+   * Update product with JTL mapping
+   */
+  private async updateProductJTLMapping(productId: string, jtlJfsku: string): Promise<void> {
+    await this.prisma.product.update({
+      where: { id: productId },
+      data: {
+        jtlProductId: jtlJfsku,
+        lastJtlSync: new Date(),
+      },
+    });
+  }
+
+  // ============= ORDERS SYNC =============
+
+  /**
+   * Full sync of orders from e-commerce platform → DB → JTL
+   */
+  async syncOrders(): Promise<SyncResult> {
+    const results: SyncItemResult[] = [];
+    let itemsProcessed = 0;
+    let itemsFailed = 0;
+
+    try {
+      const externalOrders = await this.pullOrdersFromChannel();
+
+      for (const order of externalOrders) {
+        try {
+          const localOrder = await this.upsertOrderInDB(order);
+
+          // Push to JTL FFN if order is pending or processing
+          if (localOrder.status === 'PENDING' || localOrder.status === 'PROCESSING') {
+            await this.pushOrderToJTL(localOrder);
+          }
+
+          results.push({
+            externalId: order.externalOrderId,
+            localId: localOrder.localOrderId,
+            success: true,
+            action: 'updated',
+          });
+          itemsProcessed++;
+        } catch (error) {
+          results.push({
+            externalId: order.externalOrderId,
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error',
+            action: 'failed',
+          });
+          itemsFailed++;
+        }
+      }
+
+      return {
+        success: itemsFailed === 0,
+        syncedAt: new Date(),
+        itemsProcessed,
+        itemsFailed,
+        details: results,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+        syncedAt: new Date(),
+        itemsProcessed,
+        itemsFailed,
+      };
+    }
+  }
+
+  /**
+   * Incremental sync of orders updated since last sync
+   */
+  async syncOrdersIncremental(since: Date): Promise<SyncResult> {
+    const results: SyncItemResult[] = [];
+    let itemsProcessed = 0;
+    let itemsFailed = 0;
+
+    try {
+      const externalOrders = await this.pullOrdersFromChannel(since);
+
+      for (const order of externalOrders) {
+        try {
+          const localOrder = await this.upsertOrderInDB(order);
+
+          // Push to JTL FFN if order is pending or processing
+          if (localOrder.status === 'PENDING' || localOrder.status === 'PROCESSING') {
+            await this.pushOrderToJTL(localOrder);
+          }
+
+          results.push({
+            externalId: order.externalOrderId,
+            localId: localOrder.localOrderId,
+            success: true,
+            action: 'updated',
+          });
+          itemsProcessed++;
+        } catch (error) {
+          results.push({
+            externalId: order.externalOrderId,
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error',
+            action: 'failed',
+          });
+          itemsFailed++;
+        }
+      }
+
+      return {
+        success: itemsFailed === 0,
+        syncedAt: new Date(),
+        itemsProcessed,
+        itemsFailed,
+        details: results,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+        syncedAt: new Date(),
+        itemsProcessed,
+        itemsFailed,
+      };
+    }
+  }
+
+  /**
+   * Pull orders from the configured e-commerce channel
+   * @param since Optional date to limit orders (uses created_at for historic data)
+   */
+  private async pullOrdersFromChannel(since?: Date): Promise<OrderSyncData[]> {
+    const orders: OrderSyncData[] = [];
+
+    if (this.config.channelType === 'SHOPIFY' && this.shopifyService) {
+      // For historic sync with a date, use created_at filter
+      // For regular incremental sync (no date), get all orders
+      const shopifyOrders = since
+        ? await this.shopifyService.getOrdersCreatedSince(since)
+        : await this.shopifyService.getAllOrders({ status: 'any' });
+
+      for (const order of shopifyOrders) {
+        if (order.shipping_address) {
+          orders.push(this.mapShopifyOrder(order));
+        }
+      }
+    } else if (this.config.channelType === 'WOOCOMMERCE' && this.wooCommerceService) {
+      // For historic sync with a date, use created_at filter
+      const wooOrders = since
+        ? await this.wooCommerceService.getOrdersCreatedSince(since)
+        : await this.wooCommerceService.getAllOrders();
+
+      for (const order of wooOrders) {
+        orders.push(this.mapWooCommerceOrder(order));
+      }
+    }
+
+    return orders;
+  }
+
+  /**
+   * Map Shopify order to internal format
+   */
+  private mapShopifyOrder(order: ShopifyOrder): OrderSyncData {
+    return {
+      localOrderId: '',
+      externalOrderId: String(order.id),
+      orderNumber: order.name || String(order.order_number),
+      items: order.line_items.map((item: ShopifyLineItem) => ({
+        sku: item.sku,
+        quantity: item.quantity,
+      })),
+      shippingAddress: {
+        salutation: undefined,
+        firstname: order.shipping_address?.first_name,
+        lastname: order.shipping_address?.last_name || 'Unknown',
+        company: order.shipping_address?.company || undefined,
+        street: order.shipping_address?.address1 || '',
+        houseNumber: undefined,
+        zip: order.shipping_address?.zip || '',
+        city: order.shipping_address?.city || '',
+        countryCode: order.shipping_address?.country_code || '',
+        email: order.email,
+        phone: order.shipping_address?.phone || undefined,
+      },
+      customerEmail: order.email,
+    };
+  }
+
+  /**
+   * Map WooCommerce order to internal format
+   */
+  private mapWooCommerceOrder(order: WooCommerceOrder): OrderSyncData {
+    return {
+      localOrderId: '',
+      externalOrderId: String(order.id),
+      orderNumber: order.number,
+      items: order.line_items.map((item: WooCommerceLineItem) => ({
+        sku: item.sku,
+        quantity: item.quantity,
+      })),
+      shippingAddress: {
+        salutation: undefined,
+        firstname: order.shipping.first_name,
+        lastname: order.shipping.last_name || 'Unknown',
+        company: order.shipping.company || undefined,
+        street: order.shipping.address_1,
+        houseNumber: undefined,
+        zip: order.shipping.postcode,
+        city: order.shipping.city,
+        countryCode: order.shipping.country,
+        email: order.billing.email,
+        phone: order.billing.phone || undefined,
+      },
+      customerEmail: order.billing.email,
+    };
+  }
+
+  /**
+   * Upsert order in local database
+   */
+  private async upsertOrderInDB(orderData: OrderSyncData): Promise<OrderSyncData & { status: OrderStatus }> {
+    const channel = await this.prisma.channel.findUnique({
+      where: { id: this.config.channelId },
+    });
+
+    if (!channel) {
+      throw new Error(`Channel ${this.config.channelId} not found`);
+    }
+
+    // Find existing order
+    const existingOrder = await this.prisma.order.findFirst({
+      where: {
+        channelId: this.config.channelId,
+        externalOrderId: orderData.externalOrderId,
+      },
+    });
+
+    if (existingOrder) {
+      // Update existing order
+      const updatedOrder = await this.prisma.order.update({
+        where: { id: existingOrder.id },
+        data: {
+          updatedAt: new Date(),
+        },
+      });
+
+      return { 
+        ...orderData, 
+        localOrderId: updatedOrder.id,
+        status: updatedOrder.status,
+      };
+    } else {
+      // Create new order
+      const newOrder = await this.prisma.order.create({
+        data: {
+          orderId: `ORD-${Date.now()}`, // Generate unique order ID
+          clientId: channel.clientId,
+          channelId: this.config.channelId,
+          externalOrderId: orderData.externalOrderId,
+          orderNumber: orderData.orderNumber,
+          status: 'PENDING',
+          shippingFirstName: orderData.shippingAddress.firstname || '',
+          shippingLastName: orderData.shippingAddress.lastname,
+          shippingCompany: orderData.shippingAddress.company,
+          shippingAddress1: orderData.shippingAddress.street,
+          shippingCity: orderData.shippingAddress.city,
+          shippingZip: orderData.shippingAddress.zip,
+          shippingCountry: orderData.shippingAddress.countryCode,
+          customerEmail: orderData.customerEmail,
+          customerPhone: orderData.shippingAddress.phone,
+          items: {
+            create: await Promise.all(orderData.items.map(async (item) => {
+              // Find product by SKU
+              const product = await this.prisma.product.findFirst({
+                where: { sku: item.sku },
+              });
+
+              return {
+                productId: product?.id,
+                sku: item.sku,
+                quantity: item.quantity,
+                productName: product?.name || 'Unknown Product',
+              };
+            })),
+          },
+        },
+      });
+
+      return { 
+        ...orderData, 
+        localOrderId: newOrder.id,
+        status: newOrder.status,
+      };
+    }
+  }
+
+  /**
+   * Push order to JTL FFN as outbound
+   */
+  private async pushOrderToJTL(orderData: OrderSyncData & { status: OrderStatus }): Promise<void> {
+    // Get JTL product IDs for order items
+    const itemsWithJtlIds = await Promise.all(
+      orderData.items.map(async (item) => {
+        const product = await this.prisma.product.findFirst({
+          where: { sku: item.sku },
+        });
+
+        return {
+          ...item,
+          jtlJfsku: product?.jtlProductId || undefined,
+        };
+      })
+    );
+
+    // Filter out items without JTL IDs
+    const validItems = itemsWithJtlIds.filter(item => item.jtlJfsku);
+
+    if (validItems.length === 0) {
+      console.warn(`No valid items with JTL IDs for order ${orderData.orderNumber}`);
+      return;
+    }
+
+    const jtlOutbound: JTLOutbound = {
+      merchantOutboundNumber: `${this.config.channelId}-${orderData.externalOrderId}`,
+      warehouseId: this.config.jtlWarehouseId,
+      fulfillerId: this.config.jtlFulfillerId,
+      externalNumber: orderData.orderNumber,
+      shippingType: 'Standard',
+      priority: 'Normal',
+      shippingAddress: orderData.shippingAddress,
+      items: validItems.map((item, index) => ({
+        outboundItemId: `${orderData.externalOrderId}-${index}`,
+        jfsku: item.jtlJfsku!,
+        merchantSku: item.sku,
+        quantity: item.quantity,
+      })),
+    };
+
+    try {
+      const result = await this.jtlService.createOutbound(jtlOutbound);
+      
+      // Update order with JTL outbound ID
+      await this.prisma.order.update({
+        where: { id: orderData.localOrderId },
+        data: {
+          jtlOutboundId: result.outboundId,
+          status: 'PROCESSING',
+          lastJtlSync: new Date(),
+        },
+      });
+    } catch (error) {
+      console.error(`Failed to push order ${orderData.orderNumber} to JTL:`, error);
+      throw error;
+    }
+  }
+
+  // ============= RETURNS SYNC =============
+
+  /**
+   * Sync returns/refunds from e-commerce platform → DB → JTL
+   */
+  async syncReturns(since?: Date): Promise<SyncResult> {
+    const results: SyncItemResult[] = [];
+    let itemsProcessed = 0;
+    let itemsFailed = 0;
+
+    try {
+      const externalRefunds = await this.pullRefundsFromChannel(since);
+
+      for (const refund of externalRefunds) {
+        try {
+          const localReturn = await this.createReturnInDB(refund);
+
+          // Push to JTL FFN
+          await this.pushReturnToJTL(localReturn);
+
+          results.push({
+            externalId: refund.refundId,
+            localId: localReturn.localReturnId,
+            success: true,
+            action: 'created',
+          });
+          itemsProcessed++;
+        } catch (error) {
+          results.push({
+            externalId: refund.refundId,
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error',
+            action: 'failed',
+          });
+          itemsFailed++;
+        }
+      }
+
+      return {
+        success: itemsFailed === 0,
+        syncedAt: new Date(),
+        itemsProcessed,
+        itemsFailed,
+        details: results,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+        syncedAt: new Date(),
+        itemsProcessed,
+        itemsFailed,
+      };
+    }
+  }
+
+  /**
+   * Pull refunds from e-commerce channel
+   */
+  private async pullRefundsFromChannel(since?: Date): Promise<{
+    refundId: string;
+    orderId: string;
+    items: { sku: string; quantity: number }[];
+  }[]> {
+    const refunds: {
+      refundId: string;
+      orderId: string;
+      items: { sku: string; quantity: number }[];
+    }[] = [];
+
+    if (this.config.channelType === 'SHOPIFY' && this.shopifyService) {
+      const refundData = await this.shopifyService.getRefundsUpdatedSince(since || new Date(0));
+      
+      for (const { orderId, refunds: orderRefunds } of refundData) {
+        for (const refund of orderRefunds) {
+          refunds.push({
+            refundId: String(refund.id),
+            orderId: String(orderId),
+            items: refund.refund_line_items?.map((item: ShopifyRefundLineItem) => ({
+              sku: '', // Would need to look up from order
+              quantity: item.quantity,
+            })) || [],
+          });
+        }
+      }
+    } else if (this.config.channelType === 'WOOCOMMERCE' && this.wooCommerceService) {
+      const refundData = await this.wooCommerceService.getRefundsUpdatedSince(since || new Date(0));
+      
+      for (const { orderId, refunds: orderRefunds } of refundData) {
+        for (const refund of orderRefunds) {
+          refunds.push({
+            refundId: String(refund.id),
+            orderId: String(orderId),
+            items: [], // WooCommerce refund structure differs
+          });
+        }
+      }
+    }
+
+    return refunds;
+  }
+
+  /**
+   * Create return in local database
+   */
+  private async createReturnInDB(refundData: {
+    refundId: string;
+    orderId: string;
+    items: { sku: string; quantity: number }[];
+  }): Promise<{
+    localReturnId: string;
+    orderId: string;
+    items: { sku: string; quantity: number; jtlJfsku?: string }[];
+  }> {
+    // Find the order
+    const order = await this.prisma.order.findFirst({
+      where: {
+        channelId: this.config.channelId,
+        externalOrderId: refundData.orderId,
+      },
+      include: { items: true },
+    });
+
+    if (!order) {
+      throw new Error(`Order ${refundData.orderId} not found for refund`);
+    }
+
+    // Create return record
+    const returnRecord = await this.prisma.return.create({
+      data: {
+        returnId: `RET-${Date.now()}`, // Generate unique return ID
+        orderId: order.id,
+        clientId: order.clientId,
+        status: 'ANNOUNCED',
+        externalReturnId: refundData.refundId,
+        items: {
+          create: refundData.items.map(item => ({
+            sku: item.sku,
+            quantity: item.quantity,
+          })),
+        },
+      },
+      include: { items: true },
+    });
+
+    // Map items with JTL IDs
+    const itemsWithJtlIds = await Promise.all(
+      refundData.items.map(async (item) => {
+        const product = await this.prisma.product.findFirst({
+          where: { sku: item.sku },
+        });
+        return {
+          ...item,
+          jtlJfsku: product?.jtlProductId || undefined,
+        };
+      })
+    );
+
+    return {
+      localReturnId: returnRecord.id,
+      orderId: order.id,
+      items: itemsWithJtlIds,
+    };
+  }
+
+  /**
+   * Push return to JTL FFN
+   */
+  private async pushReturnToJTL(returnData: {
+    localReturnId: string;
+    orderId: string;
+    items: { sku: string; quantity: number; jtlJfsku?: string }[];
+  }): Promise<void> {
+    const validItems = returnData.items.filter(item => item.jtlJfsku);
+
+    if (validItems.length === 0) {
+      console.warn(`No valid items with JTL IDs for return ${returnData.localReturnId}`);
+      return;
+    }
+
+    // Get order for JTL outbound ID
+    const order = await this.prisma.order.findUnique({
+      where: { id: returnData.orderId },
+    });
+
+    const jtlReturn: JTLReturn = {
+      merchantReturnNumber: returnData.localReturnId,
+      warehouseId: this.config.jtlWarehouseId,
+      fulfillerId: this.config.jtlFulfillerId,
+      items: validItems.map((item, index) => ({
+        returnItemId: `${returnData.localReturnId}-${index}`,
+        jfsku: item.jtlJfsku!,
+        merchantSku: item.sku,
+        quantity: item.quantity,
+        outboundId: order?.jtlOutboundId || undefined,
+      })),
+    };
+
+    try {
+      const result = await this.jtlService.createReturn(jtlReturn);
+      
+      await this.prisma.return.update({
+        where: { id: returnData.localReturnId },
+        data: {
+          jtlReturnId: result.returnId,
+          status: 'ANNOUNCED',
+          lastJtlSync: new Date(),
+        },
+      });
+    } catch (error) {
+      console.error(`Failed to push return ${returnData.localReturnId} to JTL:`, error);
+      throw error;
+    }
+  }
+
+  // ============= JTL UPDATES POLLING =============
+
+  /**
+   * Poll JTL for outbound (order) status updates
+   */
+  async pollJTLOutboundUpdates(since: Date): Promise<SyncResult> {
+    const results: SyncItemResult[] = [];
+    let itemsProcessed = 0;
+    let itemsFailed = 0;
+
+    try {
+      const updates = await this.jtlService.getOutboundUpdates({
+        since: since.toISOString(),
+      });
+
+      for (const update of updates) {
+        try {
+          // Find order by JTL outbound ID
+          const order = await this.prisma.order.findFirst({
+            where: { jtlOutboundId: update.id },
+          });
+
+          if (order) {
+            // Map JTL status to our order status
+            const newStatus = this.mapJTLStatusToOrderStatus(update.data.status);
+            
+            await this.prisma.order.update({
+              where: { id: order.id },
+              data: {
+                status: newStatus,
+                lastJtlSync: new Date(),
+              },
+            });
+
+            // Update e-commerce platform with fulfillment status if shipped
+            if (newStatus === 'SHIPPED') {
+              await this.updateChannelOrderStatus(order.id, 'fulfilled');
+            }
+
+            results.push({
+              externalId: update.id,
+              localId: order.id,
+              success: true,
+              action: 'updated',
+            });
+            itemsProcessed++;
+          }
+        } catch (error) {
+          results.push({
+            externalId: update.id,
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error',
+            action: 'failed',
+          });
+          itemsFailed++;
+        }
+      }
+
+      return {
+        success: itemsFailed === 0,
+        syncedAt: new Date(),
+        itemsProcessed,
+        itemsFailed,
+        details: results,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+        syncedAt: new Date(),
+        itemsProcessed,
+        itemsFailed,
+      };
+    }
+  }
+
+  /**
+   * Poll JTL for return status updates
+   */
+  async pollJTLReturnUpdates(since: Date): Promise<SyncResult> {
+    const results: SyncItemResult[] = [];
+    let itemsProcessed = 0;
+    let itemsFailed = 0;
+
+    try {
+      const updates = await this.jtlService.getReturnUpdates({
+        since: since.toISOString(),
+      });
+
+      for (const update of updates) {
+        try {
+          const returnRecord = await this.prisma.return.findFirst({
+            where: { jtlReturnId: update.id },
+          });
+
+          if (returnRecord) {
+            const newStatus = this.mapJTLStatusToReturnStatus(update.data.status);
+            
+            await this.prisma.return.update({
+              where: { id: returnRecord.id },
+              data: {
+                status: newStatus,
+                lastJtlSync: new Date(),
+              },
+            });
+
+            results.push({
+              externalId: update.id,
+              localId: returnRecord.id,
+              success: true,
+              action: 'updated',
+            });
+            itemsProcessed++;
+          }
+        } catch (error) {
+          results.push({
+            externalId: update.id,
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error',
+            action: 'failed',
+          });
+          itemsFailed++;
+        }
+      }
+
+      return {
+        success: itemsFailed === 0,
+        syncedAt: new Date(),
+        itemsProcessed,
+        itemsFailed,
+        details: results,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+        syncedAt: new Date(),
+        itemsProcessed,
+        itemsFailed,
+      };
+    }
+  }
+
+  /**
+   * Update e-commerce channel with order status
+   * Called when JTL reports fulfillment updates (shipped, tracking, etc.)
+   */
+  private async updateChannelOrderStatus(orderId: string, status: string): Promise<void> {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      include: {
+        channel: true,
+        items: true,
+      },
+    });
+
+    if (!order) return;
+
+    // If no channel linked, nothing to update
+    if (!order.channel) {
+      console.log(`[SyncOrchestrator] Order ${orderId} has no linked channel, skipping fulfillment update`);
+      return;
+    }
+
+    try {
+      const encryptionService = getEncryptionService();
+
+      if (order.channel.type === 'SHOPIFY') {
+        // Update Shopify order with fulfillment info
+        if (!order.channel.shopDomain || !order.channel.accessToken) {
+          console.log(`[SyncOrchestrator] Missing Shopify credentials for channel ${order.channel.id}`);
+          return;
+        }
+
+        const shopifyService = createShopifyServiceAuto({
+          shopDomain: order.channel.shopDomain,
+          accessToken: encryptionService.decrypt(order.channel.accessToken),
+        });
+
+        // Map status to Shopify fulfillment status
+        const fulfillmentStatus = this.mapStatusToShopifyFulfillment(status);
+        
+        if (fulfillmentStatus === 'fulfilled' && order.trackingNumber) {
+          // Create fulfillment with tracking info
+          const externalOrderId = order.externalOrderId ? parseInt(order.externalOrderId) : null;
+          if (externalOrderId) {
+            // Use default location_id (in production, this should be stored in channel config)
+            // Shopify requires location_id for fulfillments - using 1 as default
+            const locationId = 1;
+            
+            await shopifyService.createFulfillment(
+              externalOrderId,
+              {
+                location_id: locationId,
+                tracking_number: order.trackingNumber,
+                tracking_company: order.carrierSelection || undefined,
+                notify_customer: true,
+                line_items: order.items.map((item, index) => ({
+                  id: index + 1, // Shopify line item IDs are 1-indexed
+                  quantity: item.quantity,
+                })),
+              }
+            );
+          }
+
+          console.log(`[SyncOrchestrator] Created Shopify fulfillment for order ${orderId}`);
+        } else if (fulfillmentStatus && order.externalOrderId) {
+          // Update order status
+          const externalOrderId = parseInt(order.externalOrderId);
+          if (!isNaN(externalOrderId)) {
+            // Update order note with status (note_attributes not supported in updateOrder)
+            const existingNote = order.notes || '';
+            const statusNote = `\n[No-Limits] Status: ${status} (${new Date().toISOString()})`;
+            await shopifyService.updateOrder(externalOrderId, {
+              note: existingNote + statusNote,
+            });
+          }
+        }
+      } else if (order.channel.type === 'WOOCOMMERCE') {
+        // Update WooCommerce order status
+        if (!order.channel.apiUrl || !order.channel.apiClientId || !order.channel.apiClientSecret) {
+          console.log(`[SyncOrchestrator] Missing WooCommerce credentials for channel ${order.channel.id}`);
+          return;
+        }
+
+        const wooService = new WooCommerceService({
+          url: order.channel.apiUrl,
+          consumerKey: encryptionService.decrypt(order.channel.apiClientId),
+          consumerSecret: encryptionService.decrypt(order.channel.apiClientSecret),
+        });
+
+        // Map status to WooCommerce order status
+        const wooStatus = this.mapStatusToWooCommerceStatus(status);
+
+        if (order.externalOrderId) {
+          await wooService.updateOrderStatus(
+            parseInt(order.externalOrderId),
+            wooStatus
+          );
+
+          console.log(`[SyncOrchestrator] Updated WooCommerce order ${order.externalOrderId} to status: ${wooStatus}`);
+        }
+      }
+
+      // Log the fulfillment update
+      await this.prisma.orderSyncLog.create({
+        data: {
+          orderId,
+          action: 'fulfill',
+          origin: 'JTL',
+          targetPlatform: order.channel.type.toLowerCase(),
+          success: true,
+          changedFields: ['status', 'trackingNumber'],
+        },
+      });
+
+      // Update order sync status
+      await this.prisma.order.update({
+        where: { id: orderId },
+        data: {
+          lastSyncedToCommerce: new Date(),
+          syncStatus: 'SYNCED',
+        },
+      });
+    } catch (error) {
+      console.error(`[SyncOrchestrator] Failed to update channel order status:`, error);
+      
+      // Log the failure
+      await this.prisma.orderSyncLog.create({
+        data: {
+          orderId,
+          action: 'fulfill',
+          origin: 'JTL',
+          targetPlatform: order.channel?.type?.toLowerCase() || 'unknown',
+          success: false,
+          errorMessage: error instanceof Error ? error.message : 'Unknown error',
+        },
+      });
+    }
+  }
+
+  /**
+   * Map internal status to Shopify fulfillment status
+   */
+  private mapStatusToShopifyFulfillment(status: string): string | null {
+    const statusMap: Record<string, string> = {
+      'SHIPPED': 'fulfilled',
+      'DELIVERED': 'fulfilled',
+      'PROCESSING': 'partial',
+      'CANCELLED': 'restocked',
+    };
+    return statusMap[status.toUpperCase()] || null;
+  }
+
+  /**
+   * Map internal status to WooCommerce order status
+   */
+  private mapStatusToWooCommerceStatus(status: string): string {
+    const statusMap: Record<string, string> = {
+      'PENDING': 'pending',
+      'PROCESSING': 'processing',
+      'SHIPPED': 'completed',
+      'DELIVERED': 'completed',
+      'CANCELLED': 'cancelled',
+      'ON_HOLD': 'on-hold',
+    };
+    return statusMap[status.toUpperCase()] || 'processing';
+  }
+
+  /**
+   * Map JTL outbound status to internal order status
+   */
+  private mapJTLStatusToOrderStatus(jtlStatus: string): OrderStatus {
+    const statusMap: Record<string, OrderStatus> = {
+      'Created': 'PROCESSING',
+      'Accepted': 'PROCESSING',
+      'Processing': 'PROCESSING',
+      'Packed': 'PROCESSING',
+      'Shipped': 'SHIPPED',
+      'Delivered': 'DELIVERED',
+      'Cancelled': 'CANCELLED',
+    };
+
+    return statusMap[jtlStatus] || 'PENDING';
+  }
+
+  /**
+   * Map JTL return status to internal return status
+   */
+  private mapJTLStatusToReturnStatus(jtlStatus: string): ReturnStatus {
+    const statusMap: Record<string, ReturnStatus> = {
+      'Announced': 'ANNOUNCED',
+      'Received': 'RECEIVED',
+      'Processed': 'PROCESSED',
+      'Completed': 'PROCESSED',
+    };
+
+    return statusMap[jtlStatus] || 'ANNOUNCED';
+  }
+
+  /**
+   * Update sync job progress
+   * Non-blocking - failures don't stop sync
+   */
+  private async updateSyncProgress(
+    syncJobId: string | undefined,
+    updates: {
+      currentPhase?: string;
+      totalProducts?: number;
+      syncedProducts?: number;
+      failedProducts?: number;
+      totalOrders?: number;
+      syncedOrders?: number;
+      failedOrders?: number;
+      totalReturns?: number;
+      syncedReturns?: number;
+      failedReturns?: number;
+    }
+  ): Promise<void> {
+    if (!syncJobId) return;
+
+    try {
+      await this.prisma.syncJob.update({
+        where: { id: syncJobId },
+        data: updates,
+      });
+    } catch (error) {
+      console.error('[Progress] Update failed:', error);
+      // Don't fail sync if progress update fails
+    }
+  }
+
+  // ============= FULL SYNC =============
+
+  /**
+   * Run full sync of all data types (OPTIMIZED with parallel processing)
+   * @param since Optional date to limit sync to data updated since this date (for initial sync with 180-day limit)
+   * @param syncJobId Optional sync job ID for progress tracking
+   */
+  async runFullSync(since?: Date, syncJobId?: string): Promise<{
+    products: SyncResult;
+    orders: SyncResult;
+    returns: SyncResult;
+  }> {
+    console.log('[SyncOrchestrator] Starting optimized full sync', {
+      channelId: this.config.channelId,
+      syncJobId,
+      since: since?.toISOString(),
+    });
+
+    try {
+      // Get channel info to retrieve clientId
+      const channel = await this.prisma.channel.findUnique({
+        where: { id: this.config.channelId },
+        select: { clientId: true },
+      });
+
+      if (!channel) {
+        throw new Error(`Channel ${this.config.channelId} not found`);
+      }
+
+      // Initialize product cache for O(1) lookups during order/return sync
+      this.productCache = new ProductCache(this.prisma);
+      await this.productCache.initialize(channel.clientId);
+
+      // Update sync job: starting products phase
+      await this.updateSyncProgress(syncJobId, {
+        currentPhase: 'products',
+      });
+
+      // PHASE 1: Sync products (sequential - orders depend on product JTL IDs)
+      const productsResult = since
+        ? await this.syncProductsIncremental(since)
+        : await this.syncProducts();
+
+      // Refresh product cache after products sync (now has JTL IDs)
+      await this.productCache.initialize(channel.clientId);
+
+      // Update sync job: products complete, starting parallel phase
+      await this.updateSyncProgress(syncJobId, {
+        currentPhase: 'parallel',
+      });
+
+      // PHASE 2: Sync orders + returns in PARALLEL (both can run independently)
+      const [ordersResult, returnsResult] = await Promise.all([
+        (async () => {
+          await this.updateSyncProgress(syncJobId, { currentPhase: 'orders' });
+          return since
+            ? await this.syncOrdersIncremental(since)
+            : await this.syncOrders();
+        })(),
+        (async () => {
+          await this.updateSyncProgress(syncJobId, { currentPhase: 'returns' });
+          return await this.syncReturns(since);
+        })(),
+      ]);
+
+      // Clear product cache
+      this.productCache.clear();
+      this.productCache = undefined;
+
+      console.log('[SyncOrchestrator] Optimized full sync completed', {
+        channelId: this.config.channelId,
+        syncJobId,
+        results: {
+          products: {
+            processed: productsResult.itemsProcessed,
+            failed: productsResult.itemsFailed,
+          },
+          orders: {
+            processed: ordersResult.itemsProcessed,
+            failed: ordersResult.itemsFailed,
+          },
+          returns: {
+            processed: returnsResult.itemsProcessed,
+            failed: returnsResult.itemsFailed,
+          },
+        },
+      });
+
+      return {
+        products: productsResult,
+        orders: ordersResult,
+        returns: returnsResult,
+      };
+    } catch (error) {
+      // Clean up cache on error
+      if (this.productCache) {
+        this.productCache.clear();
+        this.productCache = undefined;
+      }
+
+      console.error('[SyncOrchestrator] Full sync failed:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Run incremental sync of all data types
+   */
+  async runIncrementalSync(since: Date): Promise<{
+    products: SyncResult;
+    orders: SyncResult;
+    returns: SyncResult;
+    jtlOutboundUpdates: SyncResult;
+    jtlReturnUpdates: SyncResult;
+  }> {
+    const productsResult = await this.syncProductsIncremental(since);
+    const ordersResult = await this.syncOrdersIncremental(since);
+    const returnsResult = await this.syncReturns(since);
+    const jtlOutboundUpdates = await this.pollJTLOutboundUpdates(since);
+    const jtlReturnUpdates = await this.pollJTLReturnUpdates(since);
+
+    return {
+      products: productsResult,
+      orders: ordersResult,
+      returns: returnsResult,
+      jtlOutboundUpdates,
+      jtlReturnUpdates,
+    };
+  }
+}
+
+export default SyncOrchestrator;
