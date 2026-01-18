@@ -132,9 +132,9 @@ export class JTLOrderSyncService {
             console.log(`[JTL-FFN-SYNC] Transforming order to JTL outbound format...`);
             const outbound = this.transformOrderToOutbound(order);
             console.log(`[JTL-FFN-SYNC] Outbound payload prepared:`, {
-                merchantOrderId: outbound.merchantOrderId,
+                merchantOutboundNumber: outbound.merchantOutboundNumber,
                 itemCount: outbound.items?.length,
-                shippingCountry: outbound.shippingAddress?.countryCode,
+                shippingCountry: outbound.shipTo?.countryCode,
             });
 
             // Create outbound in JTL-FFN
