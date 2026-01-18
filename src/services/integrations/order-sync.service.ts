@@ -822,27 +822,36 @@ export class OrderSyncService {
    * 
    * NOTE: Stress test orders (identified by tags or email patterns) are
    * automatically skipped to prevent test data from reaching the real warehouse.
+   * 
+   * Set STRESS_TEST_SYNC_TO_FFN=true to force sync even for test orders (for full E2E testing)
    */
   private async queueFfnSync(orderId: string, origin: string, eventId?: string): Promise<void> {
     try {
-      // First, check if this is a stress test order
-      const order = await this.prisma.order.findUnique({
-        where: { id: orderId },
-        select: { tags: true, customerEmail: true },
-      });
-
-      if (order && this.isStressTestOrder(order)) {
-        console.log(`[OrderSync] Skipping FFN sync for stress test order ${orderId}`);
-        
-        // Update sync status to indicate test mode skip
-        await this.prisma.order.update({
+      // Check if we should bypass test mode detection (for full E2E stress testing)
+      const forceSync = process.env.STRESS_TEST_SYNC_TO_FFN === 'true';
+      
+      if (!forceSync) {
+        // First, check if this is a stress test order
+        const order = await this.prisma.order.findUnique({
           where: { id: orderId },
-          data: {
-            syncStatus: 'SKIPPED',
-            ffnSyncError: 'Stress test order - FFN sync disabled',
-          },
+          select: { tags: true, customerEmail: true },
         });
-        return;
+
+        if (order && this.isStressTestOrder(order)) {
+          console.log(`[OrderSync] Skipping FFN sync for stress test order ${orderId}`);
+          
+          // Update sync status to indicate test mode skip
+          await this.prisma.order.update({
+            where: { id: orderId },
+            data: {
+              syncStatus: 'SKIPPED',
+              ffnSyncError: 'Stress test order - FFN sync disabled',
+            },
+          });
+          return;
+        }
+      } else {
+        console.log(`[OrderSync] STRESS_TEST_SYNC_TO_FFN enabled - forcing FFN sync for order ${orderId}`);
       }
 
       // Import queue service dynamically to avoid circular dependencies
