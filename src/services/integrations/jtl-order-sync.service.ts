@@ -79,6 +79,9 @@ export class JTLOrderSyncService {
         outboundId?: string;
         error?: string;
     }> {
+        const startTime = Date.now();
+        console.log(`[JTL-FFN-SYNC] ========== START: Syncing order ${orderId} to JTL-FFN ==========`);
+        
         try {
             const order = await this.prisma.order.findUnique({
                 where: { id: orderId },
@@ -89,34 +92,61 @@ export class JTLOrderSyncService {
             });
 
             if (!order) {
+                console.log(`[JTL-FFN-SYNC] ERROR: Order ${orderId} not found in database`);
                 throw new Error(`Order ${orderId} not found`);
             }
 
+            console.log(`[JTL-FFN-SYNC] Order details:`, {
+                orderId: order.id,
+                orderNumber: order.orderNumber,
+                externalOrderId: order.externalOrderId,
+                customerEmail: order.customerEmail,
+                origin: order.orderOrigin,
+                itemCount: order.items.length,
+                total: order.total?.toString(),
+                clientId: order.clientId,
+            });
+
             // Don't sync cancelled orders
             if (order.isCancelled) {
-                console.log(`[JTL] Skipping cancelled order ${orderId}`);
+                console.log(`[JTL-FFN-SYNC] SKIPPED: Order ${orderId} is cancelled - not syncing to FFN`);
                 return { success: true };
             }
 
             // Get JTL service
+            console.log(`[JTL-FFN-SYNC] Getting JTL service for client ${order.clientId}...`);
             const jtlService = await this.getJTLService(order.clientId);
             if (!jtlService) {
+                console.log(`[JTL-FFN-SYNC] ERROR: JTL not configured or inactive for client ${order.clientId}`);
                 return { success: false, error: 'JTL not configured for this client' };
             }
+            console.log(`[JTL-FFN-SYNC] JTL service initialized successfully`);
 
             // Check if already synced
             if (order.jtlOutboundId) {
-                console.log(`[JTL] Order ${orderId} already synced as outbound ${order.jtlOutboundId}`);
+                console.log(`[JTL-FFN-SYNC] ALREADY SYNCED: Order ${orderId} already exists as outbound ${order.jtlOutboundId}`);
                 return { success: true, outboundId: order.jtlOutboundId };
             }
 
             // Transform order to JTL outbound format
+            console.log(`[JTL-FFN-SYNC] Transforming order to JTL outbound format...`);
             const outbound = this.transformOrderToOutbound(order);
+            console.log(`[JTL-FFN-SYNC] Outbound payload prepared:`, {
+                merchantOrderId: outbound.merchantOrderId,
+                itemCount: outbound.items?.length,
+                shippingCountry: outbound.shippingAddress?.countryCode,
+            });
 
             // Create outbound in JTL-FFN
+            console.log(`[JTL-FFN-SYNC] Sending order to JTL-FFN API...`);
             const result = await jtlService.createOutbound(outbound);
+            console.log(`[JTL-FFN-SYNC] JTL-FFN API response:`, {
+                success: true,
+                outboundId: result.outboundId,
+            });
 
             // Update order with JTL IDs
+            console.log(`[JTL-FFN-SYNC] Updating order ${orderId} with JTL outbound ID...`);
             await this.prisma.order.update({
                 where: { id: orderId },
                 data: {
@@ -140,11 +170,26 @@ export class JTLOrderSyncService {
                 },
             });
 
-            console.log(`[JTL] Order ${orderId} synced to FFN as outbound ${result.outboundId}`);
+            const duration = Date.now() - startTime;
+            console.log(`[JTL-FFN-SYNC] ========== SUCCESS: Order ${orderId} synced to FFN ==========`);
+            console.log(`[JTL-FFN-SYNC] Summary:`, {
+                orderId,
+                orderNumber: order.orderNumber,
+                outboundId: result.outboundId,
+                duration: `${duration}ms`,
+                syncStatus: 'SYNCED',
+            });
 
             return { success: true, outboundId: result.outboundId };
         } catch (error: any) {
-            console.error(`[JTL] Failed to sync order ${orderId}:`, error);
+            const duration = Date.now() - startTime;
+            console.error(`[JTL-FFN-SYNC] ========== FAILED: Order ${orderId} sync failed ==========`);
+            console.error(`[JTL-FFN-SYNC] Error details:`, {
+                orderId,
+                error: error.message,
+                stack: error.stack,
+                duration: `${duration}ms`,
+            });
 
             // Log failed sync
             await this.prisma.orderSyncLog.create({

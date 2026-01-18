@@ -278,23 +278,31 @@ export class QueueWorkerService {
 
     private async handleOrderSyncToFFN(data: OrderSyncJobData): Promise<JobResult> {
         const { orderId, operation } = data;
-        console.log(`[QueueWorker] Processing order sync to FFN: ${orderId} (${operation})`);
+        const startTime = Date.now();
+        console.log(`[QueueWorker] ========== FFN Sync Job Started ==========`);
+        console.log(`[QueueWorker] Job details:`, { orderId, operation, timestamp: new Date().toISOString() });
 
         try {
             switch (operation) {
                 case 'create':
                 case 'update':
+                    console.log(`[QueueWorker] Calling jtlOrderSyncService.syncOrderToFFN for ${orderId}...`);
                     const syncResult = await this.jtlOrderSyncService.syncOrderToFFN(orderId);
                     if (!syncResult.success) {
+                        console.log(`[QueueWorker] FFN sync FAILED for ${orderId}: ${syncResult.error}`);
                         return { success: false, error: syncResult.error };
                     }
+                    console.log(`[QueueWorker] FFN sync SUCCESS for ${orderId}, outboundId: ${syncResult.outboundId}`);
                     break;
 
                 case 'cancel':
+                    console.log(`[QueueWorker] Calling jtlOrderSyncService.cancelOrderInFFN for ${orderId}...`);
                     const cancelResult = await this.jtlOrderSyncService.cancelOrderInFFN(orderId);
                     if (!cancelResult.success) {
+                        console.log(`[QueueWorker] FFN cancel FAILED for ${orderId}: ${cancelResult.error}`);
                         return { success: false, error: cancelResult.error };
                     }
+                    console.log(`[QueueWorker] FFN cancel SUCCESS for ${orderId}`);
                     break;
 
                 case 'fulfill':
@@ -303,12 +311,17 @@ export class QueueWorkerService {
                     break;
 
                 default:
+                    console.log(`[QueueWorker] Unknown operation: ${operation}`);
                     return { success: false, error: `Unknown operation: ${operation}` };
             }
 
+            const duration = Date.now() - startTime;
+            console.log(`[QueueWorker] ========== FFN Sync Job Completed (${duration}ms) ==========`);
             return { success: true };
         } catch (error: any) {
-            console.error(`[QueueWorker] Order sync to FFN failed:`, error);
+            const duration = Date.now() - startTime;
+            console.error(`[QueueWorker] ========== FFN Sync Job FAILED (${duration}ms) ==========`);
+            console.error(`[QueueWorker] Error:`, { orderId, operation, error: error.message });
             this.logDLQEvent('unknown', QUEUE_NAMES.ORDER_SYNC_TO_FFN, data, error.message, 0);
             return { success: false, error: error.message };
         }
