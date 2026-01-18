@@ -57,6 +57,7 @@ console.log('✅ Enhanced product sync system initialized');
 
 // Initialize background job queue
 import { initializeQueue, shutdownQueue } from './services/queue/sync-queue.service.js';
+import { initializeQueueWorkers } from './services/queue/queue-worker.service.js';
 let queueInitialized = false;
 
 // Queue will be initialized after server starts
@@ -67,8 +68,13 @@ const initQueue = async () => {
       return;
     }
     await initializeQueue(env.databaseUrl, prisma);
-    queueInitialized = true;
     console.log('✅ Background job queue initialized');
+
+    // Initialize queue workers to process jobs
+    await initializeQueueWorkers(prisma);
+    console.log('✅ Queue workers initialized and ready to process jobs');
+
+    queueInitialized = true;
   } catch (error) {
     console.error('❌ Failed to initialize queue:', error);
   }
