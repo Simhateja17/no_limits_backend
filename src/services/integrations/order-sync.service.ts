@@ -28,6 +28,20 @@ import { WooCommerceService } from './woocommerce.service.js';
 import { JTLService } from './jtl.service.js';
 import ShippingMethodService from '../shipping-method.service.js';
 import { notificationService } from '../notification.service.js';
+
+/**
+ * Test mode detection constants
+ * Orders with these tags or email patterns are stress test orders
+ * and should NOT sync to the real JTL-FFN warehouse
+ */
+const STRESS_TEST_TAGS = ['stress-test', 'k6', 'test-mode', 'load-test'];
+const STRESS_TEST_EMAIL_PATTERNS = [
+  '@test.com',
+  '@test-medium.com',
+  '@blackfriday-test.com',
+  '@stress-test.io',
+  '@load-test.net',
+];
 import crypto from 'crypto';
 
 type Decimal = Prisma.Decimal;
@@ -781,10 +795,56 @@ export class OrderSyncService {
   }
 
   /**
+   * Check if an order is a stress test order (should not sync to real FFN)
+   */
+  private isStressTestOrder(order: { tags?: string[] | null; customerEmail?: string | null }): boolean {
+    // Check for stress test tags
+    if (order.tags && Array.isArray(order.tags)) {
+      const hasTestTag = order.tags.some(tag => 
+        STRESS_TEST_TAGS.some(testTag => tag.toLowerCase().includes(testTag))
+      );
+      if (hasTestTag) return true;
+    }
+
+    // Check for stress test email patterns
+    if (order.customerEmail) {
+      const hasTestEmail = STRESS_TEST_EMAIL_PATTERNS.some(pattern =>
+        order.customerEmail!.toLowerCase().includes(pattern.toLowerCase())
+      );
+      if (hasTestEmail) return true;
+    }
+
+    return false;
+  }
+
+  /**
    * Queue sync to JTL-FFN
+   * 
+   * NOTE: Stress test orders (identified by tags or email patterns) are
+   * automatically skipped to prevent test data from reaching the real warehouse.
    */
   private async queueFfnSync(orderId: string, origin: string, eventId?: string): Promise<void> {
     try {
+      // First, check if this is a stress test order
+      const order = await this.prisma.order.findUnique({
+        where: { id: orderId },
+        select: { tags: true, customerEmail: true },
+      });
+
+      if (order && this.isStressTestOrder(order)) {
+        console.log(`[OrderSync] Skipping FFN sync for stress test order ${orderId}`);
+        
+        // Update sync status to indicate test mode skip
+        await this.prisma.order.update({
+          where: { id: orderId },
+          data: {
+            syncStatus: 'SKIPPED',
+            ffnSyncError: 'Stress test order - FFN sync disabled',
+          },
+        });
+        return;
+      }
+
       // Import queue service dynamically to avoid circular dependencies
       const { getQueue, QUEUE_NAMES } = await import('../queue/sync-queue.service.js');
 

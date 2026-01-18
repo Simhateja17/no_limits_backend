@@ -454,6 +454,7 @@ enum SyncStatus {
   PENDING       // Sync pending
   CONFLICT      // Manual resolution needed
   ERROR         // Sync error
+  SKIPPED       // Sync skipped (e.g., stress test orders)
 }
 
 // Fulfillment state for orders (Operational truth = No-Limits platform)
