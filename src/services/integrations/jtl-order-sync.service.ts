@@ -68,7 +68,7 @@ export class JTLOrderSyncService {
             accessToken: jtlConfig.accessToken ? encryptionService.decrypt(jtlConfig.accessToken) : undefined,
             refreshToken: jtlConfig.refreshToken ? encryptionService.decrypt(jtlConfig.refreshToken) : undefined,
             tokenExpiresAt: jtlConfig.tokenExpiresAt || undefined,
-        });
+        }, this.prisma, clientId);
     }
 
     /**

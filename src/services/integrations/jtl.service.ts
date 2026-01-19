@@ -69,19 +69,27 @@ export class JTLService {
   private accessToken: string | null = null;
   private tokenExpiresAt: Date | null = null;
 
+  // For token persistence after refresh
+  private prisma?: PrismaClient;
+  private internalClientId?: string;
+
   // JTL FFN API base URLs
   private static readonly SANDBOX_URL = 'https://ffn-sbx.api.jtl-software.com/api';
   private static readonly PRODUCTION_URL = 'https://ffn.api.jtl-software.com/api';
-  
+
   // OAuth URLs (same for both sandbox and production per JTL documentation)
   private static readonly OAUTH_URL = 'https://oauth2.api.jtl-software.com';
 
-  constructor(credentials: JTLCredentials) {
+  constructor(credentials: JTLCredentials, prisma?: PrismaClient, internalClientId?: string) {
     this.credentials = credentials;
-    this.baseUrl = credentials.environment === 'production' 
-      ? JTLService.PRODUCTION_URL 
+    this.baseUrl = credentials.environment === 'production'
+      ? JTLService.PRODUCTION_URL
       : JTLService.SANDBOX_URL;
-    
+
+    // Store prisma and clientId for token persistence
+    this.prisma = prisma;
+    this.internalClientId = internalClientId;
+
     if (credentials.accessToken) {
       this.accessToken = credentials.accessToken;
     }
@@ -219,7 +227,14 @@ export class JTLService {
   private async ensureValidToken(): Promise<void> {
     // If token is expired or will expire in 5 minutes, refresh it
     if (this.tokenExpiresAt && new Date() >= new Date(this.tokenExpiresAt.getTime() - 5 * 60 * 1000)) {
-      await this.refreshAccessToken();
+      // If we have prisma and clientId, persist the new tokens to database
+      if (this.prisma && this.internalClientId) {
+        console.log('[JTL] Token expiring soon, refreshing and persisting to database...');
+        await this.refreshAndPersistToken(this.internalClientId, this.prisma);
+      } else {
+        console.warn('[JTL] Token refreshed but NOT persisted - no prisma/clientId provided');
+        await this.refreshAccessToken();
+      }
     }
 
     if (!this.accessToken) {

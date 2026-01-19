@@ -530,7 +530,7 @@ export class SyncQueueProcessor {
         fulfillerId: jtlConfig.fulfillerId,
         warehouseId: jtlConfig.warehouseId,
         environment: jtlConfig.environment as 'sandbox' | 'production',
-      });
+      }, this.prisma, jtlConfig.clientId_fk);
 
       // Transform order to JTL outbound format
       const outboundItems = order.items.map((item: any) => ({
@@ -946,7 +946,7 @@ export class JTLPollingService {
         fulfillerId: config.fulfillerId,
         warehouseId: config.warehouseId,
         environment: config.environment as 'sandbox' | 'production',
-      });
+      }, this.prisma, config.clientId_fk);
 
       // Get stock level updates
       const stockLevels = await jtlService.getStockLevels({

@@ -8,6 +8,7 @@ import { PrismaClient, ChannelType } from '@prisma/client';
 import { SyncOrchestrator } from './sync-orchestrator.js';
 import { SyncResult } from './types.js';
 import { getEncryptionService } from '../encryption.service.js';
+import { JTLService } from './jtl.service.js';
 
 interface SchedulerConfig {
   /**
@@ -33,6 +34,12 @@ interface SchedulerConfig {
    * Default: 3
    */
   maxConcurrentSyncs: number;
+
+  /**
+   * Interval for proactive JTL token refresh in hours
+   * Default: 12 hours
+   */
+  tokenRefreshIntervalHours: number;
 }
 
 interface ChannelSyncState {
@@ -84,6 +91,7 @@ export class SyncScheduler {
   private incrementalTimer?: NodeJS.Timeout;
   private fullSyncTimer?: NodeJS.Timeout;
   private jtlPollTimer?: NodeJS.Timeout;
+  private tokenRefreshTimer?: NodeJS.Timeout;
   private isRunning = false;
 
   private static readonly DEFAULT_CONFIG: SchedulerConfig = {
@@ -91,6 +99,7 @@ export class SyncScheduler {
     fullSyncIntervalHours: 24,
     jtlPollIntervalMinutes: 2,
     maxConcurrentSyncs: 3,
+    tokenRefreshIntervalHours: 12,
   };
 
   constructor(prisma: PrismaClient, config?: Partial<SchedulerConfig>) {
@@ -117,11 +126,13 @@ export class SyncScheduler {
     this.startIncrementalSyncTimer();
     this.startFullSyncTimer();
     this.startJtlPollTimer();
+    this.startTokenRefreshTimer();
 
     console.log('Sync scheduler started successfully');
     console.log(`- Incremental sync: every ${this.config.incrementalSyncIntervalMinutes} minutes`);
     console.log(`- Full sync: every ${this.config.fullSyncIntervalHours} hours`);
     console.log(`- JTL polling: every ${this.config.jtlPollIntervalMinutes} minutes`);
+    console.log(`- Token refresh: every ${this.config.tokenRefreshIntervalHours} hours`);
   }
 
   /**
@@ -148,6 +159,11 @@ export class SyncScheduler {
     if (this.jtlPollTimer) {
       clearInterval(this.jtlPollTimer);
       this.jtlPollTimer = undefined;
+    }
+
+    if (this.tokenRefreshTimer) {
+      clearInterval(this.tokenRefreshTimer);
+      this.tokenRefreshTimer = undefined;
     }
 
     this.isRunning = false;
@@ -219,6 +235,70 @@ export class SyncScheduler {
     this.jtlPollTimer = setInterval(() => {
       this.pollJtlUpdatesForAllChannels();
     }, intervalMs);
+  }
+
+  /**
+   * Start proactive JTL token refresh timer
+   */
+  private startTokenRefreshTimer(): void {
+    const intervalMs = this.config.tokenRefreshIntervalHours * 60 * 60 * 1000;
+
+    // Run once on startup
+    this.refreshAllJTLTokens();
+
+    this.tokenRefreshTimer = setInterval(() => {
+      this.refreshAllJTLTokens();
+    }, intervalMs);
+  }
+
+  /**
+   * Proactively refresh all JTL tokens to prevent expiration
+   */
+  async refreshAllJTLTokens(): Promise<void> {
+    console.log('[Scheduler] Starting proactive JTL token refresh...');
+
+    const configs = await this.prisma.jtlConfig.findMany({
+      where: { isActive: true },
+    });
+
+    if (configs.length === 0) {
+      console.log('[Scheduler] No active JTL configs found');
+      return;
+    }
+
+    const encryptionService = getEncryptionService();
+    let success = 0;
+    let failed = 0;
+
+    for (const config of configs) {
+      try {
+        // Skip if no refresh token (can't refresh)
+        if (!config.refreshToken) {
+          console.warn(`[TokenRefresh] Skipping client ${config.clientId_fk} - no refresh token`);
+          continue;
+        }
+
+        const jtlService = new JTLService({
+          clientId: config.clientId,
+          clientSecret: encryptionService.decrypt(config.clientSecret),
+          accessToken: config.accessToken ? encryptionService.decrypt(config.accessToken) : undefined,
+          refreshToken: encryptionService.decrypt(config.refreshToken),
+          tokenExpiresAt: config.tokenExpiresAt ?? undefined,
+          environment: config.environment as 'sandbox' | 'production',
+          fulfillerId: config.fulfillerId,
+          warehouseId: config.warehouseId,
+        }, this.prisma, config.clientId_fk);
+
+        await jtlService.refreshAndPersistToken(config.clientId_fk, this.prisma);
+        console.log(`[TokenRefresh] ✓ Refreshed tokens for client ${config.clientId_fk}`);
+        success++;
+      } catch (error) {
+        console.error(`[TokenRefresh] ✗ Failed for client ${config.clientId_fk}:`, error instanceof Error ? error.message : 'Unknown error');
+        failed++;
+      }
+    }
+
+    console.log(`[Scheduler] Token refresh complete: ${success} success, ${failed} failed`);
   }
 
   /**

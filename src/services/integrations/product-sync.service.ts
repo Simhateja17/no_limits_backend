@@ -854,6 +854,7 @@ export class ProductSyncService {
       fulfillerId: string;
       warehouseId: string;
       environment: string;
+      clientId_fk: string;
     },
     fieldsToSync?: string[]
   ): Promise<string | undefined> {
@@ -871,7 +872,7 @@ export class ProductSyncService {
       fulfillerId: jtlConfig.fulfillerId,
       warehouseId: jtlConfig.warehouseId,
       environment: jtlConfig.environment as 'sandbox' | 'production',
-    });
+    }, this.prisma, jtlConfig.clientId_fk);
 
     // Build identifier object (matches n8n workflow structure)
     const identifier = {
