@@ -98,10 +98,37 @@ export class SyncQueueService {
       await this.boss.start();
       this.isStarted = true;
       console.log('[Queue] Started successfully');
+
+      // Create all queues (required in pg-boss v10+)
+      await this.createQueues();
     } catch (error) {
       console.error('[Queue] Failed to start:', error);
       throw error;
     }
+  }
+
+  /**
+   * Create all required queues (pg-boss v10+ requirement)
+   */
+  private async createQueues(): Promise<void> {
+    const queueNames = Object.values(QUEUE_NAMES);
+    console.log(`[Queue] Creating ${queueNames.length} queues...`);
+
+    for (const queueName of queueNames) {
+      try {
+        await this.boss.createQueue(queueName);
+        console.log(`[Queue] Created queue: ${queueName}`);
+      } catch (error: any) {
+        // Queue might already exist, which is fine
+        if (error.message?.includes('already exists')) {
+          console.log(`[Queue] Queue already exists: ${queueName}`);
+        } else {
+          console.error(`[Queue] Failed to create queue ${queueName}:`, error.message);
+        }
+      }
+    }
+
+    console.log('[Queue] All queues created successfully');
   }
 
   /**
