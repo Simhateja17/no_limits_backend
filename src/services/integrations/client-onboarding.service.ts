@@ -272,9 +272,13 @@ export class ClientOnboardingService {
         };
       }
 
+      // Decrypt credentials for JTL service
+      const encryptionService = getEncryptionService();
+      const decryptedClientSecret = encryptionService.decrypt(jtlConfig.clientSecret);
+
       const jtlService = new JTLService({
         clientId: jtlConfig.clientId,
-        clientSecret: jtlConfig.clientSecret,
+        clientSecret: decryptedClientSecret,
         environment: jtlConfig.environment as 'sandbox' | 'production',
       });
 
@@ -289,7 +293,6 @@ export class ClientOnboardingService {
       }
 
       // Update config with encrypted tokens
-      const encryptionService = getEncryptionService();
       await this.prisma.jtlConfig.update({
         where: { id: jtlConfig.id },
         data: {
@@ -306,7 +309,7 @@ export class ClientOnboardingService {
         // Create a new JTL service with the fresh tokens for syncing
         const jtlServiceWithTokens = new JTLService({
           clientId: jtlConfig.clientId,
-          clientSecret: jtlConfig.clientSecret,
+          clientSecret: decryptedClientSecret,
           accessToken: tokenResult.accessToken,
           refreshToken: tokenResult.refreshToken,
           tokenExpiresAt: tokenResult.expiresAt,

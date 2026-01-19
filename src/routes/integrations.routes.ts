@@ -314,11 +314,13 @@ router.post('/jtl/test/:clientId', async (req: Request, res: Response) => {
       });
     }
 
+    const encryptionService = getEncryptionService();
     const jtlService = new JTLService({
       clientId: config.clientId,
-      clientSecret: config.clientSecret,
-      accessToken: config.accessToken || undefined,
-      refreshToken: config.refreshToken || undefined,
+      clientSecret: encryptionService.decrypt(config.clientSecret),
+      accessToken: config.accessToken ? encryptionService.decrypt(config.accessToken) : undefined,
+      refreshToken: config.refreshToken ? encryptionService.decrypt(config.refreshToken) : undefined,
+      tokenExpiresAt: config.tokenExpiresAt || undefined,
       environment: config.environment as 'sandbox' | 'production',
     });
 
