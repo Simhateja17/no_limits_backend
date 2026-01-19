@@ -1166,22 +1166,34 @@ export class WebhookProcessorService {
 
   /**
    * Queue order sync to JTL FFN after webhook processing
+   * Uses pg-boss queue (same as order-sync.service.ts) for proper worker processing
    */
   private async queueJTLOrderSync(orderId: string, channelType: ChannelType): Promise<void> {
-    if (!this.syncQueueProcessor) {
-      console.warn('[Webhook] SyncQueueProcessor not initialized, skipping order JTL sync queue');
-      return;
-    }
-
     try {
-      // Determine the origin based on channel type
-      const origin = channelType === 'SHOPIFY' ? 'SHOPIFY' : 'WOOCOMMERCE';
+      // Import queue service dynamically to avoid circular dependencies
+      const { getQueue, QUEUE_NAMES } = await import('../queue/sync-queue.service.js');
+      const queue = getQueue();
 
-      // Queue the order to be synced to JTL
-      const jobId = await this.syncQueueProcessor.queueOrderSync(orderId, origin, 10);
-      if (jobId) {
-        console.log(`[Webhook] Queued JTL sync for order ${orderId}, job: ${jobId}`);
-      }
+      // Determine the origin based on channel type
+      const origin = channelType === 'SHOPIFY' ? 'shopify' : 'woocommerce';
+
+      // Queue the order to pg-boss for processing by QueueWorkerService
+      const jobId = await queue.enqueue(
+        QUEUE_NAMES.ORDER_SYNC_TO_FFN,
+        {
+          orderId,
+          origin,
+          operation: 'create',
+        },
+        {
+          priority: 1,
+          retryLimit: 3,
+          retryDelay: 60,
+          retryBackoff: true,
+        }
+      );
+
+      console.log(`[Webhook] Queued JTL sync for order ${orderId}, job: ${jobId}`);
     } catch (error) {
       console.error(`[Webhook] Failed to queue JTL sync for order ${orderId}:`, error);
       // Don't throw - webhook already succeeded, we just failed to queue the sync
