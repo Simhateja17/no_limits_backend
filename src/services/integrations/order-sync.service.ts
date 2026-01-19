@@ -494,9 +494,7 @@ export class OrderSyncService {
       });
 
       // 4. Queue sync to JTL-FFN (async)
-      if (this.jtlService) {
-        await this.queueFfnSync(orderId, origin, webhookEventId);
-      }
+      await this.queueFfnSync(orderId, origin, webhookEventId);
 
       return {
         success: true,
