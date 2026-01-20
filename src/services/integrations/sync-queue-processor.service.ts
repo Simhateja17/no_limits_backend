@@ -553,7 +553,7 @@ export class SyncQueueProcessor {
           addition: order.shippingAddress2 || undefined,
           city: order.shippingCity || 'Unknown',
           zip: order.shippingZip || '',
-          countryCode: (order.shippingCountryCode || order.shippingCountry || 'DE').substring(0, 2).toUpperCase(),
+          country: (order.shippingCountryCode || order.shippingCountry || 'DE').substring(0, 2).toUpperCase(),
           email: order.customerEmail || undefined,
           phone: order.customerPhone || undefined,
         },

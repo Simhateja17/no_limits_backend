@@ -317,7 +317,7 @@ export interface JTLAddress {
   houseNumber?: string;
   zip: string;
   city: string;
-  countryCode: string;
+  country: string; // JTL API expects 'country' field (ISO country code like 'DE', 'US')
   stateCode?: string;
   email?: string;
   phone?: string;

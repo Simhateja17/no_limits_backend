@@ -1648,7 +1648,7 @@ export class JTLService {
         addition: order.shippingAddress2 || undefined,
         city: order.shippingCity || '',
         zip: order.shippingZip || '',
-        countryCode: order.shippingCountryCode || order.shippingCountry || 'DE',
+        country: order.shippingCountryCode || order.shippingCountry || 'DE',
         phone: order.customerPhone || undefined,
         email: order.customerEmail || undefined,
       },

@@ -145,7 +145,7 @@ export class JTLOrderSyncService {
             console.log(`[JTL-FFN-SYNC] Outbound payload prepared:`, {
                 merchantOutboundNumber: outbound.merchantOutboundNumber,
                 itemCount: outbound.items?.length,
-                shippingCountry: outbound.shipTo?.countryCode,
+                shippingCountry: (outbound.shippingAddress as any)?.country,
             });
 
             // Create outbound in JTL-FFN
@@ -490,7 +490,7 @@ export class JTLOrderSyncService {
                 addition: order.shippingAddress2 || undefined,
                 city: order.shippingCity || '',
                 zip: order.shippingZip || '',
-                countryCode: order.shippingCountryCode || order.shippingCountry || 'DE',
+                country: order.shippingCountryCode || order.shippingCountry || 'DE',
                 phone: order.customerPhone || undefined,
                 email: order.customerEmail || undefined,
             },
