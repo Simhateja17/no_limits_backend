@@ -206,6 +206,7 @@ router.post('/jtl/exchange-token', async (req: Request, res: Response) => {
         accessToken: encryptionService.encrypt(tokens.accessToken),
         refreshToken: encryptionService.encrypt(tokens.refreshToken),
         tokenExpiresAt: tokens.expiresAt,
+        isActive: true, // Ensure config is active after successful OAuth
       },
     });
 
@@ -264,6 +265,7 @@ router.post('/jtl/config/:clientId', async (req: Request, res: Response) => {
         fulfillerId,
         warehouseId,
         environment,
+        isActive: true, // Always active when created
       },
       update: {
         clientId: jtlClientId,
@@ -271,6 +273,7 @@ router.post('/jtl/config/:clientId', async (req: Request, res: Response) => {
         fulfillerId,
         warehouseId,
         environment,
+        isActive: true, // Ensure it's active when updated
       },
     });
 
