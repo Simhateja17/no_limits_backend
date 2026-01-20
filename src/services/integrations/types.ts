@@ -260,6 +260,7 @@ export interface JTLOutbound {
   merchantOutboundNumber: string;
   warehouseId?: string;
   fulfillerId?: string;
+  currency?: string; // ISO 4217 currency code (EUR, USD, etc.)
   customerOrderNumber?: string;
   orderDate?: string;
   externalNumber?: string;

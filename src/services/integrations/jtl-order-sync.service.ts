@@ -113,11 +113,22 @@ export class JTLOrderSyncService {
                 return { success: true };
             }
 
+            // Get JTL config
+            console.log(`[JTL-FFN-SYNC] Getting JTL config for client ${order.clientId}...`);
+            const jtlConfig = await this.prisma.jtlConfig.findUnique({
+                where: { clientId_fk: order.clientId },
+            });
+
+            if (!jtlConfig || !jtlConfig.isActive) {
+                console.log(`[JTL-FFN-SYNC] ERROR: JTL not configured or inactive for client ${order.clientId}`);
+                return { success: false, error: 'JTL not configured for this client' };
+            }
+
             // Get JTL service
             console.log(`[JTL-FFN-SYNC] Getting JTL service for client ${order.clientId}...`);
             const jtlService = await this.getJTLService(order.clientId);
             if (!jtlService) {
-                console.log(`[JTL-FFN-SYNC] ERROR: JTL not configured or inactive for client ${order.clientId}`);
+                console.log(`[JTL-FFN-SYNC] ERROR: JTL service initialization failed for client ${order.clientId}`);
                 return { success: false, error: 'JTL not configured for this client' };
             }
             console.log(`[JTL-FFN-SYNC] JTL service initialized successfully`);
@@ -130,7 +141,7 @@ export class JTLOrderSyncService {
 
             // Transform order to JTL outbound format
             console.log(`[JTL-FFN-SYNC] Transforming order to JTL outbound format...`);
-            const outbound = this.transformOrderToOutbound(order);
+            const outbound = this.transformOrderToOutbound(order, jtlConfig);
             console.log(`[JTL-FFN-SYNC] Outbound payload prepared:`, {
                 merchantOutboundNumber: outbound.merchantOutboundNumber,
                 itemCount: outbound.items?.length,
@@ -298,13 +309,21 @@ export class JTLOrderSyncService {
                 throw new Error(`Split order ${splitOrderId} not found`);
             }
 
+            const jtlConfig = await this.prisma.jtlConfig.findUnique({
+                where: { clientId_fk: order.clientId },
+            });
+
+            if (!jtlConfig || !jtlConfig.isActive) {
+                return { success: false, error: 'JTL not configured for this client' };
+            }
+
             const jtlService = await this.getJTLService(order.clientId);
             if (!jtlService) {
                 return { success: false, error: 'JTL not configured for this client' };
             }
 
             // Create outbound with only the split items
-            const outbound = this.transformOrderToOutbound(order, items);
+            const outbound = this.transformOrderToOutbound(order, jtlConfig, items);
             const result = await jtlService.createOutbound(outbound);
 
             // Update order
@@ -436,6 +455,7 @@ export class JTLOrderSyncService {
      */
     private transformOrderToOutbound(
         order: Order & { items: Array<{ sku: string | null; productName: string | null; quantity: number; unitPrice: any; totalPrice: any; product?: { jtlProductId?: string | null } | null }> },
+        jtlConfig: { warehouseId: string; fulfillerId: string },
         filterItems?: Array<{ sku: string; quantity: number }>
     ): JTLOutbound {
         let items = order.items;
@@ -449,6 +469,9 @@ export class JTLOrderSyncService {
 
         return {
             merchantOutboundNumber: order.orderId,
+            warehouseId: jtlConfig.warehouseId,
+            fulfillerId: jtlConfig.fulfillerId,
+            currency: order.currency || 'EUR',
             customerOrderNumber: order.orderNumber || order.orderId,
             orderDate: order.orderDate.toISOString(),
             shipTo: {
@@ -467,6 +490,7 @@ export class JTLOrderSyncService {
             items: items.map((item) => ({
                 merchantSku: item.sku || 'UNKNOWN',
                 jfsku: item.product?.jtlProductId || undefined,
+                outboundItemId: item.product?.jtlProductId || undefined,
                 name: item.productName || item.sku || 'Unknown Product',
                 quantity: item.quantity,
                 unitPrice: item.unitPrice ? parseFloat(item.unitPrice.toString()) : 0,

@@ -1624,9 +1624,12 @@ export class JTLService {
     // Determine shipping method to use
     // Priority: jtlShippingMethodId > carrierSelection > shippingMethod
     const useJtlShippingMethodId = !!order.jtlShippingMethodId;
-    
+
     return {
       merchantOutboundNumber: order.orderId,
+      warehouseId: this.credentials.warehouseId,
+      fulfillerId: this.credentials.fulfillerId,
+      currency: order.currency || 'EUR',
       customerOrderNumber: order.orderNumber || order.orderId,
       orderDate: order.orderDate?.toISOString() || new Date().toISOString(),
       shipTo: {
@@ -1645,14 +1648,15 @@ export class JTLService {
       items: items.map((item: any) => ({
         merchantSku: item.sku || 'UNKNOWN',
         jfsku: item.product?.jtlProductId || undefined,
+        outboundItemId: item.product?.jtlProductId || undefined,
         name: item.productName || item.sku || 'Unknown Product',
         quantity: item.quantity,
         unitPrice: item.unitPrice ? parseFloat(item.unitPrice.toString()) : 0,
       })),
       // Use JTL shipping method ID if available (more precise), otherwise fallback
       shippingMethodId: useJtlShippingMethodId ? order.jtlShippingMethodId : undefined,
-      shippingMethod: !useJtlShippingMethodId 
-        ? (order.carrierSelection || order.shippingMethod || undefined) 
+      shippingMethod: !useJtlShippingMethodId
+        ? (order.carrierSelection || order.shippingMethod || undefined)
         : undefined,
       priority: order.priorityLevel || 0,
       note: order.warehouseNotes || order.notes || undefined,
