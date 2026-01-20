@@ -467,6 +467,14 @@ export class JTLOrderSyncService {
             );
         }
 
+        // Parse shipping name into firstname/lastname for JTL format
+        const fullName = `${order.shippingFirstName || ''} ${order.shippingLastName || ''}`.trim() ||
+            order.customerName ||
+            'Unknown';
+        const nameParts = fullName.split(' ');
+        const firstname = nameParts[0] || 'Unknown';
+        const lastname = nameParts.slice(1).join(' ') || firstname;
+
         return {
             merchantOutboundNumber: order.orderId,
             warehouseId: jtlConfig.warehouseId,
@@ -474,13 +482,12 @@ export class JTLOrderSyncService {
             currency: order.currency || 'EUR',
             customerOrderNumber: order.orderNumber || order.orderId,
             orderDate: order.orderDate.toISOString(),
-            shipTo: {
-                name: `${order.shippingFirstName || ''} ${order.shippingLastName || ''}`.trim() ||
-                    order.customerName ||
-                    'Unknown',
+            shippingAddress: {
+                firstname,
+                lastname,
                 company: order.shippingCompany || undefined,
                 street: order.shippingAddress1 || '',
-                additionalAddress: order.shippingAddress2 || undefined,
+                addition: order.shippingAddress2 || undefined,
                 city: order.shippingCity || '',
                 zip: order.shippingZip || '',
                 countryCode: order.shippingCountryCode || order.shippingCountry || 'DE',
@@ -490,7 +497,7 @@ export class JTLOrderSyncService {
             items: items.map((item) => ({
                 merchantSku: item.sku || 'UNKNOWN',
                 jfsku: item.product?.jtlProductId || undefined,
-                outboundItemId: item.product?.jtlProductId || undefined,
+                outboundItemId: item.product?.jtlProductId || item.sku || 'UNKNOWN',
                 name: item.productName || item.sku || 'Unknown Product',
                 quantity: item.quantity,
                 unitPrice: item.unitPrice ? parseFloat(item.unitPrice.toString()) : 0,
