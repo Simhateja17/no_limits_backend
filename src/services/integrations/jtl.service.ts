@@ -1660,10 +1660,11 @@ export class JTLService {
         quantity: item.quantity,
         unitPrice: item.unitPrice ? parseFloat(item.unitPrice.toString()) : 0,
       })),
-      // Use JTL shipping method ID if available (more precise), otherwise fallback
+      // Use JTL shipping method ID if available (more precise), otherwise fallback to shippingMethod
+      // If neither available, use default 'Standard' shipping method
       shippingMethodId: useJtlShippingMethodId ? order.jtlShippingMethodId : undefined,
       shippingMethod: !useJtlShippingMethodId
-        ? (order.carrierSelection || order.shippingMethod || undefined)
+        ? (order.carrierSelection || order.shippingMethod || 'Standard')
         : undefined,
       priority: order.priorityLevel || 0,
       note: order.warehouseNotes || order.notes || undefined,

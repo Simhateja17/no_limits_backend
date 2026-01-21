@@ -502,7 +502,7 @@ export class JTLOrderSyncService {
                 quantity: item.quantity,
                 unitPrice: item.unitPrice ? parseFloat(item.unitPrice.toString()) : 0,
             })),
-            shippingMethod: order.carrierSelection || order.shippingMethod || undefined,
+            shippingMethod: order.carrierSelection || order.shippingMethod || 'Standard',
             priority: order.priorityLevel || 0,
             note: order.warehouseNotes || order.notes || undefined,
         };
