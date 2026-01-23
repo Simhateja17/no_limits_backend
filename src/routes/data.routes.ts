@@ -1277,16 +1277,13 @@ router.post('/returns', async (req: Request, res: Response) => {
       });
     }
 
-    // Admin/Employee can create returns, Client users need client association
-    let clientId: string | null = null;
+    // Only ADMIN, SUPER_ADMIN, and EMPLOYEE can create returns
+    // CLIENT users cannot create returns
     if (user.role === 'CLIENT') {
-      if (!user.client) {
-        return res.status(403).json({
-          success: false,
-          error: 'User must be associated with a client to create returns',
-        });
-      }
-      clientId = user.client.id;
+      return res.status(403).json({
+        success: false,
+        error: 'Clients are not authorized to create returns. Please contact support.',
+      });
     }
 
     // Validate items
@@ -1311,6 +1308,7 @@ router.post('/returns', async (req: Request, res: Response) => {
 
     // If orderId is provided, try to find the order and get its clientId
     let orderRecord = null;
+    let clientId: string | null = null;
     if (orderId) {
       orderRecord = await prisma.order.findFirst({
         where: {
@@ -1321,8 +1319,8 @@ router.post('/returns', async (req: Request, res: Response) => {
           ],
         },
       });
-      // If order found and user is admin/employee, use order's clientId
-      if (orderRecord && !clientId) {
+      // If order found, use order's clientId
+      if (orderRecord) {
         clientId = orderRecord.clientId;
       }
     }

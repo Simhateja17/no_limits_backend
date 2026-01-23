@@ -225,13 +225,37 @@ export class ShippingMethodService {
         };
       }
 
-      // Step 4: No fallback - this is a critical mismatch, order should be held
+      // Step 4: Auto-fallback - If there's only one active shipping method for this client, use it
+      // This prevents orders from being held when the user hasn't configured defaults yet
+      const activeShippingMethods = await this.prisma.shippingMethod.findMany({
+        where: {
+          isActive: true,
+          jtlShippingMethodId: { not: null },
+        },
+        take: 2, // Only need to know if there's 1 or more
+      });
+
+      if (activeShippingMethods.length === 1) {
+        const autoMethod = activeShippingMethods[0];
+        console.log(`[ShippingMethodService] Auto-fallback: Only one shipping method available, using "${autoMethod.name}" (${autoMethod.jtlShippingMethodId})`);
+        return {
+          success: true,
+          jtlShippingMethodId: autoMethod.jtlShippingMethodId!,
+          shippingMethodName: autoMethod.name,
+          usedFallback: true,
+          mismatch: false, // Not a mismatch - auto-selected because it's the only option
+          shouldHoldOrder: false,
+        };
+      }
+
+      // Step 5: No fallback - this is a critical mismatch, order should be held
       console.warn(`[ShippingMethodService] CRITICAL: No shipping method mapping or fallback for client ${clientId}, shipping: ${channelShipping.title || channelShipping.code}`);
+      console.warn(`[ShippingMethodService] Available active shipping methods: ${activeShippingMethods.length}. Please configure a default shipping method.`);
       return {
         success: false,
         usedFallback: false,
         mismatch: true,
-        mismatchReason: `No mapping found for shipping method "${channelShipping.title || channelShipping.code}" and no default shipping method configured.`,
+        mismatchReason: `No mapping found for shipping method "${channelShipping.title || channelShipping.code}" and no default shipping method configured. ${activeShippingMethods.length} shipping methods available - please set a default.`,
         shouldHoldOrder: true,
       };
     } catch (error: any) {

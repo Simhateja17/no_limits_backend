@@ -948,38 +948,58 @@ export class JTLPollingService {
         environment: config.environment as 'sandbox' | 'production',
       }, this.prisma, config.clientId_fk);
 
-      // Get stock level updates
-      const stockLevels = await jtlService.getStockLevels({
-        warehouseId: config.warehouseId,
-      });
+      // NOTE: JTL FFN Merchant API does NOT have a stock endpoint!
+      // Stock endpoints (/v1/fulfiller/stocks) are only available to Fulfillers, not Merchants.
+      // As merchants, we get stock updates through:
+      // 1. Product sync (products include stock info when synced)
+      // 2. Outbound shipping notifications (when orders are fulfilled)
+      //
+      // Instead, we poll for outbound updates to track order fulfillment status
+      try {
+        // Get the last sync time to only fetch recent updates
+        const since = config.lastSyncAt?.toISOString();
+        const outboundUpdates = await jtlService.getOutboundUpdates({ since, limit: 100 });
 
-      // Update our products with JTL stock levels
-      for (const stock of stockLevels) {
-        const product = await this.prisma.product.findFirst({
-          where: {
-            clientId: config.clientId_fk,
-            jtlProductId: stock.jfsku,
-          },
-        });
+        if (outboundUpdates.length > 0) {
+          console.log(`[JTLPollingService] Processing ${outboundUpdates.length} outbound updates for client ${config.clientId_fk}`);
+          for (const update of outboundUpdates) {
+            // Process order status updates
+            const outboundId = update.id || (update.data as any)?.outboundId;
+            const outboundData = update.data;
 
-        if (product && product.available !== stock.available) {
-          console.log(`[JTLPollingService] Updating stock for ${product.sku}: ${product.available} -> ${stock.available}`);
-          
-          await this.prisma.product.update({
-            where: { id: product.id },
-            data: {
-              available: stock.available,
-              reserved: stock.reserved,
-              lastUpdatedBy: 'JTL',
-              lastJtlSync: new Date(),
-            },
-          });
+            if (outboundId && outboundData) {
+              const order = await this.prisma.order.findFirst({
+                where: {
+                  clientId: config.clientId_fk,
+                  jtlOutboundId: outboundId,
+                },
+              });
 
-          // Queue sync to commerce platforms
-          await this.productSyncService.queueSyncToOtherPlatforms(
-            product.id,
-            'jtl'
-          );
+              if (order) {
+                console.log(`[JTLPollingService] Outbound ${outboundId} status: ${outboundData.status}`);
+                // Update order with latest status
+                const updateData: any = {
+                  jtlStatus: outboundData.status,
+                };
+
+                // Check for shipping information in the update
+                if (outboundData.status?.toLowerCase() === 'shipped') {
+                  updateData.shippedAt = new Date();
+                }
+
+                await this.prisma.order.update({
+                  where: { id: order.id },
+                  data: updateData,
+                });
+              }
+            }
+          }
+        }
+      } catch (pollError: any) {
+        // Silently handle polling errors - outbound updates are optional
+        // 404 errors are expected if no updates exist
+        if (!pollError.message?.includes('404')) {
+          console.log(`[JTLPollingService] Outbound polling note: ${pollError.message}`);
         }
       }
 

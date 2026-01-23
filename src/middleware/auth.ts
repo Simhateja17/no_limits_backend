@@ -77,7 +77,15 @@ export const authenticate = async (
       }
     }
 
-    req.user = payload;
+    // Enrich the payload with the current clientId from database
+    // This ensures that even if the token was generated before a client was associated,
+    // or if the clientId in token is stale, we use the current database state
+    const enrichedPayload = {
+      ...payload,
+      clientId: user.client?.id || payload.clientId,
+    };
+
+    req.user = enrichedPayload;
     (req as any).userId = payload.userId;
 
     next();
