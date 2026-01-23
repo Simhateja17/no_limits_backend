@@ -598,50 +598,66 @@ async function getJtlShippingMethodId(shippingMethodId: string): Promise<string 
  */
 export async function syncMyShippingMethods(req: Request, res: Response) {
   try {
+    console.log('[ShippingMethodsController] syncMyShippingMethods called');
     const user = (req as any).user;
-    
+
     if (!user?.userId) {
+      console.log('[ShippingMethodsController] No user found in request');
       return res.status(401).json({
         success: false,
         error: 'Authentication required',
       });
     }
-    
+
+    console.log('[ShippingMethodsController] User ID:', user.userId);
+
     // Fetch the user with their client association
     const dbUser = await prisma.user.findUnique({
       where: { id: user.userId },
       include: { client: true },
     });
-    
+
     if (!dbUser?.client?.id) {
+      console.log('[ShippingMethodsController] No client associated with user');
       return res.status(400).json({
         success: false,
         error: 'No client associated with this user',
       });
     }
-    
+
     const clientId = dbUser.client.id;
-    
+    console.log('[ShippingMethodsController] Client ID:', clientId);
+
     // Get JTL config for the client
     const jtlConfig = await prisma.jtlConfig.findFirst({
       where: { clientId_fk: clientId },
     });
-    
+
     if (!jtlConfig) {
+      console.log('[ShippingMethodsController] No JTL config found for client:', clientId);
       return res.status(404).json({
         success: false,
         error: 'JTL configuration not found. Please connect your JTL FFN account first.',
       });
     }
-    
+
+    console.log('[ShippingMethodsController] JTL Config found:');
+    console.log('[ShippingMethodsController]   - Environment:', jtlConfig.environment);
+    console.log('[ShippingMethodsController]   - FulfillerId:', jtlConfig.fulfillerId);
+    console.log('[ShippingMethodsController]   - WarehouseId:', jtlConfig.warehouseId);
+    console.log('[ShippingMethodsController]   - Has access token:', !!jtlConfig.accessToken);
+    console.log('[ShippingMethodsController]   - Token expires:', jtlConfig.tokenExpiresAt);
+
     if (!jtlConfig.accessToken) {
+      console.log('[ShippingMethodsController] No access token in JTL config');
       return res.status(400).json({
         success: false,
         error: 'JTL OAuth not completed. Please authorize with JTL FFN first.',
       });
     }
-    
+
     // Initialize JTL service
+    console.log('[ShippingMethodsController] Initializing JTL service...');
     const jtlService = new JTLService({
       clientId: jtlConfig.clientId,
       clientSecret: encryptionService.decrypt(jtlConfig.clientSecret),
@@ -652,23 +668,28 @@ export async function syncMyShippingMethods(req: Request, res: Response) {
       warehouseId: jtlConfig.warehouseId,
       environment: jtlConfig.environment as 'sandbox' | 'production',
     });
-    
+
     // Sync shipping methods
+    console.log('[ShippingMethodsController] Calling syncShippingMethodsFromJTL with fulfillerId:', jtlConfig.fulfillerId);
     const result = await shippingMethodService.syncShippingMethodsFromJTL(
       jtlService,
       jtlConfig.fulfillerId
     );
-    
+
+    console.log('[ShippingMethodsController] Sync result:', JSON.stringify(result));
+
     if (!result.success) {
+      console.log('[ShippingMethodsController] Sync failed:', result.error);
       return res.status(500).json({
         success: false,
         error: result.error,
       });
     }
-    
+
     // Return the synced methods
     const shippingMethods = await shippingMethodService.getActiveShippingMethods();
-    
+    console.log('[ShippingMethodsController] Active shipping methods after sync:', shippingMethods.length);
+
     res.json({
       success: true,
       message: `Synced ${result.synced} shipping methods from JTL FFN`,
@@ -677,6 +698,7 @@ export async function syncMyShippingMethods(req: Request, res: Response) {
     });
   } catch (error: any) {
     console.error('[ShippingMethodsController] Error syncing shipping methods:', error);
+    console.error('[ShippingMethodsController] Error stack:', error.stack);
     res.status(500).json({
       success: false,
       error: error.message || 'Failed to sync shipping methods',

@@ -252,7 +252,9 @@ export class JTLService {
     await this.ensureValidToken();
 
     const url = `${this.baseUrl}${endpoint}`;
-    
+
+    console.log(`[JTL Request] ${options.method || 'GET'} ${url}`);
+
     const response = await fetch(url, {
       ...options,
       headers: {
@@ -262,17 +264,23 @@ export class JTLService {
       },
     });
 
+    console.log(`[JTL Request] Response status: ${response.status}`);
+
     if (!response.ok) {
       const error = await response.text();
+      console.error(`[JTL Request] Error response: ${error}`);
       throw new Error(`JTL API error: ${response.status} - ${error}`);
     }
 
     // Handle 204 No Content
     if (response.status === 204) {
+      console.log('[JTL Request] 204 No Content response');
       return {} as T;
     }
 
-    return response.json() as Promise<T>;
+    const data = await response.json() as T;
+    console.log(`[JTL Request] Response data keys:`, Object.keys(data as object));
+    return data;
   }
 
   // ============= OUTBOUNDS (Orders) =============
@@ -901,10 +909,11 @@ export class JTLService {
     error?: string;
   }> {
     try {
+      console.log('[JTL] getShippingMethods called with params:', JSON.stringify(params));
       await this.ensureValidToken();
 
       const queryParams = new URLSearchParams();
-      
+
       // Build OData filter if needed
       const filters: string[] = [];
       if (params.fulfillerId) {
@@ -913,11 +922,11 @@ export class JTLService {
       if (params.shippingType) {
         filters.push(`shippingType eq '${params.shippingType}'`);
       }
-      
+
       if (filters.length > 0) {
         queryParams.set('$filter', filters.join(' and '));
       }
-      
+
       if (params.limit) {
         queryParams.set('$top', String(params.limit));
       }
@@ -927,7 +936,10 @@ export class JTLService {
 
       const query = queryParams.toString();
       const endpoint = `/v1/merchant/shippingmethods${query ? `?${query}` : ''}`;
-      
+
+      console.log(`[JTL] Fetching shipping methods from endpoint: ${endpoint}`);
+      console.log(`[JTL] Using base URL: ${this.baseUrl}`);
+
       const response = await this.request<{
         shippingMethods: Array<{
           shippingMethodId: string;
@@ -941,11 +953,47 @@ export class JTLService {
           note?: string;
         }>;
       }>(endpoint);
-      
-      console.log(`[JTL] Fetched ${response.shippingMethods?.length || 0} shipping methods`);
-      return { success: true, data: response.shippingMethods || [] };
+
+      console.log(`[JTL] Raw API response:`, JSON.stringify(response, null, 2));
+
+      // JTL FFN API might return data in different formats:
+      // 1. { shippingMethods: [...] }
+      // 2. { items: [...] }
+      // 3. { value: [...] } (OData format)
+      // 4. Direct array [...]
+      let methods: Array<{
+        shippingMethodId: string;
+        fulfillerId: string;
+        name: string;
+        carrierCode?: string;
+        carrierName?: string;
+        shippingType: string;
+        trackingUrlSchema?: string;
+        cutoffTime?: string;
+        note?: string;
+      }> = [];
+
+      if (Array.isArray(response)) {
+        console.log('[JTL] Response is direct array');
+        methods = response;
+      } else if (response.shippingMethods) {
+        console.log('[JTL] Response has shippingMethods key');
+        methods = response.shippingMethods;
+      } else if ((response as any).items) {
+        console.log('[JTL] Response has items key');
+        methods = (response as any).items;
+      } else if ((response as any).value) {
+        console.log('[JTL] Response has value key (OData format)');
+        methods = (response as any).value;
+      } else {
+        console.log('[JTL] Unknown response format, available keys:', Object.keys(response));
+      }
+
+      console.log(`[JTL] Fetched ${methods.length} shipping methods`);
+      return { success: true, data: methods };
     } catch (error: any) {
       console.error('[JTL] Failed to fetch shipping methods:', error);
+      console.error('[JTL] Error stack:', error.stack);
       return { success: false, error: error.message };
     }
   }

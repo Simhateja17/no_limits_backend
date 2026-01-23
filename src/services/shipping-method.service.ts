@@ -58,17 +58,43 @@ export class ShippingMethodService {
     error?: string;
   }> {
     try {
+      console.log('[ShippingMethodService] Starting sync from JTL FFN');
+      console.log('[ShippingMethodService] FulfillerId filter:', fulfillerId || 'NONE (fetching all)');
+
       // Fetch shipping methods from JTL FFN
       // If fulfillerId is provided, filter by that fulfiller
       const response = await jtlService.getShippingMethods(
         fulfillerId ? { fulfillerId } : {}
       );
 
+      console.log('[ShippingMethodService] JTL API response success:', response.success);
+      console.log('[ShippingMethodService] JTL API response error:', response.error || 'none');
+      console.log('[ShippingMethodService] JTL API data count:', response.data?.length || 0);
+
+      // If no methods found with fulfillerId filter, try without filter
+      if (response.success && (!response.data || response.data.length === 0) && fulfillerId) {
+        console.log('[ShippingMethodService] No methods found with fulfillerId filter, trying without filter...');
+        const allMethodsResponse = await jtlService.getShippingMethods({});
+        console.log('[ShippingMethodService] All methods (without filter) count:', allMethodsResponse.data?.length || 0);
+        if (allMethodsResponse.data && allMethodsResponse.data.length > 0) {
+          console.log('[ShippingMethodService] Available fulfillerIds in all methods:',
+            [...new Set(allMethodsResponse.data.map(m => m.fulfillerId))].join(', ')
+          );
+          // Use all methods if no filter was effective
+          response.data = allMethodsResponse.data;
+        }
+      }
+
       if (!response.success || !response.data) {
+        console.error('[ShippingMethodService] Failed to fetch shipping methods from JTL:', response.error);
         return { success: false, synced: 0, error: response.error || 'Failed to fetch shipping methods' };
       }
 
       const jtlMethods = response.data as JTLShippingMethod[];
+      console.log('[ShippingMethodService] JTL methods to sync:', jtlMethods.length);
+      if (jtlMethods.length > 0) {
+        console.log('[ShippingMethodService] First method sample:', JSON.stringify(jtlMethods[0], null, 2));
+      }
       let syncedCount = 0;
 
       for (const jtlMethod of jtlMethods) {
