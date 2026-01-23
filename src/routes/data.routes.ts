@@ -1247,6 +1247,142 @@ router.get('/returns/:id', async (req: Request, res: Response) => {
 });
 
 /**
+ * POST /api/data/returns
+ * Create a new return for the authenticated user's client
+ */
+router.post('/returns', async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).userId;
+    const {
+      orderId,
+      reason,
+      reasonCategory,
+      customerName,
+      customerEmail,
+      notes,
+      warehouseNotes,
+      items,
+    } = req.body;
+
+    // Get user with client relation
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      include: { client: true },
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: 'User not found',
+      });
+    }
+
+    // Admin/Employee can create returns, Client users need client association
+    let clientId: string | null = null;
+    if (user.role === 'CLIENT') {
+      if (!user.client) {
+        return res.status(403).json({
+          success: false,
+          error: 'User must be associated with a client to create returns',
+        });
+      }
+      clientId = user.client.id;
+    }
+
+    // Validate items
+    if (!items || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'At least one return item is required',
+      });
+    }
+
+    // Validate that at least one item has sku or productName
+    const validItems = items.filter((item: any) => item.sku || item.productName);
+    if (validItems.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'At least one item must have a SKU or product name',
+      });
+    }
+
+    // Generate a unique return ID
+    const returnIdDisplay = `RET-${Date.now()}-${Math.random().toString(36).substr(2, 6).toUpperCase()}`;
+
+    // If orderId is provided, try to find the order and get its clientId
+    let orderRecord = null;
+    if (orderId) {
+      orderRecord = await prisma.order.findFirst({
+        where: {
+          OR: [
+            { id: orderId },
+            { orderId: orderId },
+            { externalOrderId: orderId },
+          ],
+        },
+      });
+      // If order found and user is admin/employee, use order's clientId
+      if (orderRecord && !clientId) {
+        clientId = orderRecord.clientId;
+      }
+    }
+
+    // Create the return with items
+    const returnRecord = await prisma.return.create({
+      data: {
+        returnId: returnIdDisplay,
+        clientId: clientId,
+        orderId: orderRecord?.id || null,
+        externalOrderId: orderId || null,
+        reason: reason || null,
+        reasonCategory: reasonCategory || null,
+        customerName: customerName || null,
+        customerEmail: customerEmail || null,
+        notes: notes || null,
+        warehouseNotes: warehouseNotes || null,
+        status: 'ANNOUNCED',
+        returnOrigin: 'NOLIMITS',
+        syncStatus: 'PENDING',
+        items: {
+          create: validItems.map((item: any) => ({
+            sku: item.sku || null,
+            productName: item.productName || null,
+            quantity: item.quantity || 1,
+            condition: item.condition || 'GOOD',
+            disposition: 'PENDING_DECISION',
+          })),
+        },
+      },
+      include: {
+        client: {
+          select: {
+            companyName: true,
+            name: true,
+          },
+        },
+        order: true,
+        items: {
+          include: {
+            product: true,
+          },
+        },
+      },
+    });
+
+    res.status(201).json({
+      success: true,
+      data: returnRecord,
+    });
+  } catch (error) {
+    console.error('Error creating return:', error);
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Failed to create return',
+    });
+  }
+});
+
+/**
  * GET /api/data/inbounds
  * Fetch inbound deliveries for the authenticated user's client
  */
