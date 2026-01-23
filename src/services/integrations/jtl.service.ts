@@ -287,9 +287,35 @@ export class JTLService {
 
   /**
    * Create an outbound (order for fulfillment)
+   * @param outbound - The outbound order details
+   * @param options - Additional options for outbound creation
+   * @param options.oversale - Allow outbound creation with insufficient stock (default: true)
+   * @param options.autoCompleteBillOfMaterials - Auto-complete bill of materials (default: false)
    */
-  async createOutbound(outbound: JTLOutbound): Promise<JTLOutboundResponse> {
-    return this.request<JTLOutboundResponse>('/v1/merchant/outbounds', {
+  async createOutbound(
+    outbound: JTLOutbound,
+    options: {
+      oversale?: boolean;
+      autoCompleteBillOfMaterials?: boolean;
+    } = {}
+  ): Promise<JTLOutboundResponse> {
+    // Default to allowing oversale to prevent order failures due to stock issues
+    const { oversale = true, autoCompleteBillOfMaterials = false } = options;
+
+    const queryParams = new URLSearchParams();
+    if (oversale) {
+      queryParams.set('oversale', 'true');
+    }
+    if (autoCompleteBillOfMaterials) {
+      queryParams.set('autoCompleteBillOfMaterials', 'true');
+    }
+
+    const query = queryParams.toString();
+    const endpoint = `/v1/merchant/outbounds${query ? `?${query}` : ''}`;
+
+    console.log(`[JTL] Creating outbound with options: oversale=${oversale}, autoCompleteBillOfMaterials=${autoCompleteBillOfMaterials}`);
+
+    return this.request<JTLOutboundResponse>(endpoint, {
       method: 'POST',
       body: JSON.stringify(outbound),
     });
