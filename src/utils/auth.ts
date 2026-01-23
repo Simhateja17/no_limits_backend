@@ -22,6 +22,7 @@ export interface TokenPayload {
   userId: string;
   email: string;
   role: UserRole;
+  clientId?: string;
 }
 
 // Generate access token

@@ -99,6 +99,7 @@ export const register = async (req: Request, res: Response): Promise<void> => {
       userId: user.id,
       email: user.email,
       role: user.role,
+      clientId: user.client?.id,
     });
 
     // Set refresh token as httpOnly cookie
@@ -175,6 +176,7 @@ export const login = async (req: Request, res: Response): Promise<void> => {
       userId: user.id,
       email: user.email,
       role: user.role,
+      clientId: user.client?.id,
     });
 
     // Set refresh token as httpOnly cookie

@@ -535,43 +535,79 @@ export const getRecentMessages = async (req: Request, res: Response): Promise<vo
       return;
     }
 
-    // Only admins can access this endpoint
-    if (currentUserRole !== 'ADMIN' && currentUserRole !== 'SUPER_ADMIN') {
-      res.status(403).json({
-        success: false,
-        message: 'Only admins can access recent messages',
-      });
-      return;
-    }
-
     const messageLimit = Math.min(parseInt(limit as string) || 5, 20);
 
-    // Fetch recent messages across all chat rooms
-    const messages = await prisma.chatMessage.findMany({
-      take: messageLimit,
-      orderBy: { createdAt: 'desc' },
-      include: {
-        sender: {
-          select: {
-            id: true,
-            name: true,
-            avatar: true,
-            role: true,
+    // Build query based on user role
+    let messages;
+    if (currentUserRole === 'CLIENT') {
+      // Clients can only see messages from their own chat room
+      const clientId = req.user?.clientId;
+      if (!clientId) {
+        res.status(403).json({
+          success: false,
+          message: 'Client ID not found',
+        });
+        return;
+      }
+
+      messages = await prisma.chatMessage.findMany({
+        where: {
+          chatRoom: {
+            clientId: clientId,
           },
         },
-        chatRoom: {
-          include: {
-            client: {
-              select: {
-                id: true,
-                name: true,
-                companyName: true,
+        take: messageLimit,
+        orderBy: { createdAt: 'desc' },
+        include: {
+          sender: {
+            select: {
+              id: true,
+              name: true,
+              avatar: true,
+              role: true,
+            },
+          },
+          chatRoom: {
+            include: {
+              client: {
+                select: {
+                  id: true,
+                  name: true,
+                  companyName: true,
+                },
               },
             },
           },
         },
-      },
-    });
+      });
+    } else {
+      // Admins and employees can see all messages
+      messages = await prisma.chatMessage.findMany({
+        take: messageLimit,
+        orderBy: { createdAt: 'desc' },
+        include: {
+          sender: {
+            select: {
+              id: true,
+              name: true,
+              avatar: true,
+              role: true,
+            },
+          },
+          chatRoom: {
+            include: {
+              client: {
+                select: {
+                  id: true,
+                  name: true,
+                  companyName: true,
+                },
+              },
+            },
+          },
+        },
+      });
+    }
 
     // Transform to match frontend QuickChat interface
     const transformedMessages = messages.map((msg) => {

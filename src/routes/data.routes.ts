@@ -96,6 +96,7 @@ router.get('/dashboard/chart', async (req: Request, res: Response) => {
     // Get user
     const user = await prisma.user.findUnique({
       where: { id: userId },
+      include: { client: true },
     });
 
     if (!user) {
@@ -105,12 +106,16 @@ router.get('/dashboard/chart', async (req: Request, res: Response) => {
       });
     }
 
-    // Only admins can access this endpoint
-    if (user.role !== 'ADMIN' && user.role !== 'SUPER_ADMIN') {
-      return res.status(403).json({
-        success: false,
-        error: 'Only admins can access dashboard chart data',
-      });
+    // Build query filter based on user role
+    let clientFilter: any = {};
+    if (user.role === 'CLIENT') {
+      if (!user.client?.id) {
+        return res.status(403).json({
+          success: false,
+          error: 'Client ID not found',
+        });
+      }
+      clientFilter = { clientId: user.client.id };
     }
 
     // Default date range: last 12 months
@@ -130,6 +135,7 @@ router.get('/dashboard/chart', async (req: Request, res: Response) => {
     // Fetch orders within the date range
     const orders = await prisma.order.findMany({
       where: {
+        ...clientFilter,
         orderDate: {
           gte: startDate,
           lte: endOfMonth,
@@ -179,6 +185,7 @@ router.get('/dashboard/chart', async (req: Request, res: Response) => {
 
     const previousOrders = await prisma.order.findMany({
       where: {
+        ...clientFilter,
         orderDate: {
           gte: previousStartDate,
           lte: previousEndDate,
@@ -248,6 +255,7 @@ router.get('/dashboard/events', async (req: Request, res: Response) => {
     // Get user
     const user = await prisma.user.findUnique({
       where: { id: userId },
+      include: { client: true },
     });
 
     if (!user) {
@@ -257,18 +265,23 @@ router.get('/dashboard/events', async (req: Request, res: Response) => {
       });
     }
 
-    // Only admins can access this endpoint
-    if (user.role !== 'ADMIN' && user.role !== 'SUPER_ADMIN') {
-      return res.status(403).json({
-        success: false,
-        error: 'Only admins can access dashboard events',
-      });
-    }
-
     const eventLimit = Math.min(parseInt(limit as string) || 10, 50);
+
+    // Build query filters based on user role
+    let clientFilter: any = {};
+    if (user.role === 'CLIENT') {
+      if (!user.client?.id) {
+        return res.status(403).json({
+          success: false,
+          error: 'Client ID not found',
+        });
+      }
+      clientFilter = { clientId: user.client.id };
+    }
 
     // Fetch recent returns
     const recentReturns = await prisma.return.findMany({
+      where: clientFilter,
       take: eventLimit,
       orderBy: { createdAt: 'desc' },
       select: {
@@ -286,6 +299,7 @@ router.get('/dashboard/events', async (req: Request, res: Response) => {
 
     // Fetch recent inbounds
     const recentInbounds = await prisma.inboundDelivery.findMany({
+      where: clientFilter,
       take: eventLimit,
       orderBy: { createdAt: 'desc' },
       select: {
@@ -305,6 +319,7 @@ router.get('/dashboard/events', async (req: Request, res: Response) => {
     // Fetch orders needing attention (ERROR status or ON_HOLD)
     const ordersNeedingAttention = await prisma.order.findMany({
       where: {
+        ...clientFilter,
         OR: [
           { status: 'ERROR' },
           { isOnHold: true },
