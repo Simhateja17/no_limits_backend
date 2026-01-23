@@ -236,6 +236,7 @@ model Client {
   jtlConfig                 JtlConfig?
   shippingMethodMappings    ShippingMethodMapping[] @relation("ClientShippingMappings")
   notifications             Notification[]
+  tasks                     Task[]
   
   @@map("clients")
 }
@@ -1316,6 +1317,9 @@ model Task {
   updatedAt       DateTime      @updatedAt
   
   // Relations
+  clientId        String?       @map("client_id")
+  client          Client?       @relation(fields: [clientId], references: [id])
+  
   assigneeId      String?       @map("assignee_id")
   assignee        User?         @relation("AssignedTasks", fields: [assigneeId], references: [id])
   
