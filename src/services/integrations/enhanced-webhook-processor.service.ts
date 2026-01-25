@@ -437,6 +437,10 @@ export class EnhancedWebhookProcessor {
       case 'inventory_levels':
         return this.handleShopifyInventory(channelId, clientId, action, payload as unknown as ShopifyInventoryPayload);
       case 'orders':
+        // Handle orders/paid webhook specially for payment hold release
+        if (action === 'paid') {
+          return this.handleShopifyOrderPaid(channelId, clientId, payload as unknown as ShopifyOrderPayload, webhookId);
+        }
         return this.handleShopifyOrder(channelId, clientId, action, payload as unknown as ShopifyOrderPayload, webhookId);
       case 'refunds':
         return this.handleShopifyRefund(channelId, clientId, action, payload as unknown as ShopifyRefundPayload, webhookId);
@@ -705,6 +709,160 @@ export class EnhancedWebhookProcessor {
         externalId,
         error: error instanceof Error ? error.message : 'Unknown error',
       };
+    }
+  }
+
+  /**
+   * Handle Shopify orders/paid webhook
+   *
+   * This is triggered when an order's financial_status becomes "paid".
+   * If the order was on AWAITING_PAYMENT hold, release the hold and queue for FFN sync.
+   */
+  private async handleShopifyOrderPaid(
+    channelId: string,
+    clientId: string,
+    payload: ShopifyOrderPayload,
+    webhookId?: string
+  ): Promise<WebhookProcessResult> {
+    const externalId = String(payload.id);
+
+    console.log(`[Webhook] Shopify orders/paid received for order ${externalId}`);
+
+    try {
+      // Find the order in our database
+      const order = await this.prisma.order.findFirst({
+        where: {
+          clientId,
+          externalOrderId: externalId,
+        },
+      });
+
+      if (!order) {
+        console.log(`[Webhook] Order ${externalId} not found locally for payment confirmation`);
+        return {
+          success: true,
+          action: 'skipped',
+          entityType: 'order',
+          externalId,
+          details: { reason: 'Order not found locally' },
+        };
+      }
+
+      // Check if order is on payment hold
+      if (order.isOnHold && order.holdReason === 'AWAITING_PAYMENT') {
+        console.log(`[Webhook] Releasing AWAITING_PAYMENT hold for order ${order.id} (${externalId})`);
+
+        // Release the hold
+        await this.prisma.order.update({
+          where: { id: order.id },
+          data: {
+            isOnHold: false,
+            holdReason: null,
+            holdNotes: null,
+            holdReleasedAt: new Date(),
+            holdReleasedBy: 'SYSTEM',
+            paymentStatus: 'paid',
+            lastOperationalUpdateBy: 'SHOPIFY',
+            lastOperationalUpdateAt: new Date(),
+            ffnSyncError: null, // Clear the "awaiting payment" message
+          },
+        });
+
+        // Log the payment confirmation
+        await this.prisma.orderSyncLog.create({
+          data: {
+            orderId: order.id,
+            action: 'payment_confirmed',
+            origin: 'SHOPIFY',
+            targetPlatform: 'nolimits',
+            success: true,
+            changedFields: ['isOnHold', 'holdReason', 'paymentStatus', 'holdReleasedAt', 'holdReleasedBy'],
+          },
+        });
+
+        // Queue for FFN sync now that payment is confirmed
+        await this.queueOrderForFfnSync(order.id, 'shopify');
+
+        console.log(`[Webhook] Order ${order.id} released from payment hold and queued for FFN sync`);
+
+        return {
+          success: true,
+          action: 'updated',
+          entityType: 'order',
+          localId: order.id,
+          externalId,
+          details: { action: 'payment_hold_released', queuedForFfn: true },
+          syncQueuedTo: ['jtl'],
+        };
+      } else {
+        // Order was not on payment hold, just update payment status
+        console.log(`[Webhook] Order ${order.id} was not on payment hold, updating payment status to 'paid'`);
+
+        await this.prisma.order.update({
+          where: { id: order.id },
+          data: {
+            paymentStatus: 'paid',
+            lastOperationalUpdateAt: new Date(),
+          },
+        });
+
+        return {
+          success: true,
+          action: 'updated',
+          entityType: 'order',
+          localId: order.id,
+          externalId,
+          details: { action: 'payment_status_updated' },
+        };
+      }
+    } catch (error) {
+      console.error(`[Webhook] Error processing Shopify orders/paid webhook:`, error);
+      return {
+        success: false,
+        action: 'failed',
+        entityType: 'order',
+        externalId,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      };
+    }
+  }
+
+  /**
+   * Queue order for FFN sync (helper method for payment confirmation)
+   *
+   * Used when releasing a payment hold to trigger the FFN sync that was
+   * originally skipped when the order was created.
+   */
+  private async queueOrderForFfnSync(orderId: string, origin: 'shopify' | 'woocommerce'): Promise<void> {
+    try {
+      const { getQueue, QUEUE_NAMES } = await import('../queue/sync-queue.service.js');
+      const queue = getQueue();
+
+      await queue.enqueue(
+        QUEUE_NAMES.ORDER_SYNC_TO_FFN,
+        {
+          orderId,
+          origin: origin as 'shopify' | 'woocommerce' | 'nolimits',
+          operation: 'create',
+        },
+        {
+          priority: 1,
+          retryLimit: 3,
+          retryDelay: 60,
+          retryBackoff: true,
+        }
+      );
+
+      console.log(`[Webhook] Queued order ${orderId} for FFN sync after payment confirmation`);
+
+      await this.prisma.order.update({
+        where: { id: orderId },
+        data: {
+          syncStatus: 'PENDING',
+        },
+      });
+    } catch (error) {
+      console.error(`[Webhook] Failed to queue FFN sync for order ${orderId}:`, error);
     }
   }
 
@@ -1146,6 +1304,69 @@ export class EnhancedWebhookProcessor {
     const externalId = String(payload.id);
 
     try {
+      // Check for payment confirmation (order.updated with status change to 'processing')
+      // WooCommerce doesn't have a dedicated 'order.paid' webhook, so we detect payment
+      // by watching for status changes from pending/on-hold to processing
+      if (action === 'updated') {
+        const newStatus = payload.status?.toLowerCase();
+
+        // If the new status is 'processing', check if order was on payment hold
+        if (newStatus === 'processing') {
+          const existingOrder = await this.prisma.order.findFirst({
+            where: {
+              clientId,
+              externalOrderId: externalId,
+            },
+          });
+
+          if (existingOrder && existingOrder.isOnHold && existingOrder.holdReason === 'AWAITING_PAYMENT') {
+            console.log(`[Webhook] WooCommerce payment confirmed for order ${externalId} (status: ${newStatus})`);
+
+            // Release the hold
+            await this.prisma.order.update({
+              where: { id: existingOrder.id },
+              data: {
+                isOnHold: false,
+                holdReason: null,
+                holdNotes: null,
+                holdReleasedAt: new Date(),
+                holdReleasedBy: 'SYSTEM',
+                lastOperationalUpdateBy: 'WOOCOMMERCE',
+                lastOperationalUpdateAt: new Date(),
+                ffnSyncError: null, // Clear the "awaiting payment" message
+              },
+            });
+
+            // Log the payment confirmation
+            await this.prisma.orderSyncLog.create({
+              data: {
+                orderId: existingOrder.id,
+                action: 'payment_confirmed',
+                origin: 'WOOCOMMERCE',
+                targetPlatform: 'nolimits',
+                success: true,
+                changedFields: ['isOnHold', 'holdReason', 'holdReleasedAt', 'holdReleasedBy'],
+              },
+            });
+
+            // Queue for FFN sync
+            await this.queueOrderForFfnSync(existingOrder.id, 'woocommerce');
+
+            console.log(`[Webhook] Order ${existingOrder.id} released from payment hold and queued for FFN sync`);
+
+            return {
+              success: true,
+              action: 'updated',
+              entityType: 'order',
+              localId: existingOrder.id,
+              externalId,
+              details: { action: 'payment_hold_released', queuedForFfn: true },
+              syncQueuedTo: ['jtl'],
+            };
+          }
+        }
+      }
+
       // Extract shipping method from shipping_lines (first shipping line is the primary)
       const shippingLine = payload.shipping_lines?.[0];
       

@@ -565,6 +565,15 @@ export const releaseHold = async (req: Request, res: Response): Promise<void> =>
       return;
     }
 
+    // Prevent manual release of AWAITING_PAYMENT holds - these are system-managed
+    if (order.holdReason === 'AWAITING_PAYMENT') {
+      res.status(400).json({
+        success: false,
+        error: 'Cannot manually release payment hold. Order will be released automatically when payment is confirmed via webhook.',
+      });
+      return;
+    }
+
     // Update in JTL FFN (restore normal priority)
     if (order.jtlOutboundId && order.clientId) {
       const jtlService = await getJTLService(order.clientId);
@@ -981,6 +990,13 @@ export const bulkReleaseOrders = async (req: Request, res: Response): Promise<vo
 
         if (!order.isOnHold) {
           results.push({ orderId, success: false, error: 'Not on hold' });
+          failed++;
+          continue;
+        }
+
+        // Skip AWAITING_PAYMENT holds - these are system-managed
+        if (order.holdReason === 'AWAITING_PAYMENT') {
+          results.push({ orderId, success: false, error: 'Cannot release payment hold - auto-released when payment confirmed' });
           failed++;
           continue;
         }

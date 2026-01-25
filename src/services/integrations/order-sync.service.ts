@@ -44,6 +44,38 @@ const STRESS_TEST_EMAIL_PATTERNS = [
 ];
 import crypto from 'crypto';
 
+// ============= PAYMENT HOLD DETECTION =============
+
+/**
+ * Payment statuses that are considered "paid" for Shopify
+ * These statuses indicate the order is safe to fulfill
+ */
+const SHOPIFY_PAID_STATUSES = ['paid', 'authorized', 'partially_paid'];
+
+/**
+ * WooCommerce order statuses that indicate payment is NOT confirmed
+ * These orders should be held until payment is confirmed
+ */
+const WOOCOMMERCE_UNPAID_STATUSES = ['pending', 'on-hold'];
+
+/**
+ * Check if a Shopify order requires payment hold
+ * Returns true if payment is NOT confirmed (should hold)
+ */
+function shouldHoldShopifyOrderForPayment(paymentStatus?: string): boolean {
+  if (!paymentStatus) return true; // No status = hold by default
+  return !SHOPIFY_PAID_STATUSES.includes(paymentStatus.toLowerCase());
+}
+
+/**
+ * Check if a WooCommerce order requires payment hold
+ * Returns true if order status indicates payment is pending (should hold)
+ */
+function shouldHoldWooCommerceOrderForPayment(orderStatus?: string): boolean {
+  if (!orderStatus) return true; // No status = hold by default
+  return WOOCOMMERCE_UNPAID_STATUSES.includes(orderStatus.toLowerCase());
+}
+
 type Decimal = Prisma.Decimal;
 
 // ============= FIELD OWNERSHIP DEFINITIONS =============
@@ -289,6 +321,7 @@ export class OrderSyncService {
 
       let orderId: string;
       let action: 'created' | 'updated';
+      let newOrderPaymentHold = false; // Track if new order requires payment hold (to skip FFN sync)
 
       if (existingOrder) {
         // Update existing order with new commercial data from origin
@@ -338,7 +371,31 @@ export class OrderSyncService {
           mismatch: shippingResolution.mismatch,
           shouldHoldOrder: shippingResolution.shouldHoldOrder,
         });
-        
+
+        // 2c. Check if order requires payment hold
+        const requiresPaymentHold = origin === 'shopify'
+          ? shouldHoldShopifyOrderForPayment(data.paymentStatus)
+          : shouldHoldWooCommerceOrderForPayment(data.status?.toString());
+
+        // Determine final hold status (payment hold takes priority, then shipping mismatch)
+        const finalIsOnHold = requiresPaymentHold || shippingResolution.shouldHoldOrder;
+        const finalHoldReason = requiresPaymentHold
+          ? 'AWAITING_PAYMENT'
+          : (shippingResolution.shouldHoldOrder ? 'SHIPPING_METHOD_MISMATCH' : null);
+
+        console.log(`[OrderSync] Payment hold check for ${data.externalOrderId}:`, {
+          origin,
+          paymentStatus: data.paymentStatus,
+          orderStatus: data.status,
+          requiresPaymentHold,
+          shippingHold: shippingResolution.shouldHoldOrder,
+          finalIsOnHold,
+          finalHoldReason,
+        });
+
+        // Track payment hold for later (to skip FFN sync)
+        newOrderPaymentHold = requiresPaymentHold;
+
         // Create new order with commerce data
         const order = await this.prisma.order.create({
           data: {
@@ -399,8 +456,13 @@ export class OrderSyncService {
             jtlShippingMethodId: shippingResolution.jtlShippingMethodId,  // Resolved JTL ID
             shippingMethodMismatch: shippingResolution.mismatch,          // Flag if no mapping found
             shippingMethodFallback: shippingResolution.usedFallback,      // Flag if using fallback
-            isOnHold: shippingResolution.shouldHoldOrder,                 // Hold if no shipping method
             trackingNumber: data.trackingNumber,
+
+            // Hold status (payment hold or shipping method mismatch)
+            isOnHold: finalIsOnHold,
+            holdReason: finalHoldReason,
+            holdPlacedAt: finalIsOnHold ? new Date() : null,
+            holdPlacedBy: finalIsOnHold ? 'SYSTEM' : null,
 
             // Notes
             notes: data.notes,
@@ -493,14 +555,28 @@ export class OrderSyncService {
         changedFields: Object.keys(data),
       });
 
-      // 4. Queue sync to JTL-FFN (async)
-      await this.queueFfnSync(orderId, origin, webhookEventId);
+      // 4. Queue sync to JTL-FFN (async) - SKIP if new order is on payment hold
+      if (newOrderPaymentHold) {
+        console.log(`[OrderSync] Order ${orderId} is on AWAITING_PAYMENT hold - NOT queuing for FFN sync until payment confirmed`);
+
+        // Update sync status to indicate waiting for payment
+        await this.prisma.order.update({
+          where: { id: orderId },
+          data: {
+            syncStatus: 'PENDING',
+            ffnSyncError: 'Awaiting payment confirmation before syncing to fulfillment',
+          },
+        });
+      } else {
+        await this.queueFfnSync(orderId, origin, webhookEventId);
+      }
 
       return {
         success: true,
         action,
         orderId,
         externalIds: { [origin]: data.externalOrderId },
+        syncedToFfn: !newOrderPaymentHold, // Indicate if FFN sync was queued
       };
     } catch (error: any) {
       console.error(`[OrderSync] Failed to process incoming order:`, error);
