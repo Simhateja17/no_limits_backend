@@ -63,6 +63,46 @@ interface JTLUpdateItem<T = unknown> {
   data: T;
 }
 
+// Stock information from JTL FFN Products API
+interface JTLStockInfo {
+  stockLevel: number;           // Available stock
+  stockLevelAnnounced: number;  // Expected from inbounds
+  stockLevelReserved: number;   // Reserved for orders
+  stockLevelBlocked: number;    // Blocked stock
+  warehouses?: {
+    warehouseId: string;
+    fulfillerId: string;
+    stockLevel: number;
+    stockLevelAnnounced: number;
+    stockLevelReserved: number;
+    stockLevelBlocked: number;
+  }[];
+}
+
+// Product with stock information from GET /api/v1/merchant/products
+export interface JTLProductWithStock {
+  jfsku: string;
+  name: string;
+  merchantSku: string;
+  stock?: JTLStockInfo;
+  modificationInfo?: {
+    createdAt: string;
+    updatedAt: string;
+    state: string;
+  };
+}
+
+// Response format from GET /api/v1/merchant/products
+interface JTLProductsWithStockResponse {
+  items: JTLProductWithStock[];
+  _page?: {
+    total: number;
+    limit: number;
+    offset: number;
+  };
+  count?: number;
+}
+
 export class JTLService {
   private credentials: JTLCredentials;
   private baseUrl: string;
@@ -587,7 +627,7 @@ export class JTLService {
   }
 
   /**
-   * Get stock levels for products
+   * Get stock levels for products (legacy method - may not work for merchants)
    */
   async getStockLevels(params: {
     jfsku?: string;
@@ -608,6 +648,83 @@ export class JTLService {
     
     const response = await this.request<{ stockLevels: { jfsku: string; available: number; reserved: number; warehouseId: string }[] }>(endpoint);
     return response.stockLevels || [];
+  }
+
+  /**
+   * Get all products with stock information using Products API
+   * This is the proper way for merchants to get stock levels
+   * 
+   * API: GET /api/v1/merchant/products
+   * Uses $select to include stock fields
+   * 
+   * Returns: Products with stock.stockLevel, stock.stockLevelReserved, etc.
+   */
+  async getProductsWithStock(params: {
+    top?: number;
+    skip?: number;
+    filter?: string;
+    orderBy?: string;
+    warehouseId?: string;
+    fulfillerId?: string;
+  } = {}): Promise<JTLProductWithStock[]> {
+    const queryParams = new URLSearchParams();
+    
+    // Use JTL's OData-style parameters
+    if (params.top !== undefined) queryParams.set('$top', String(params.top));
+    if (params.skip !== undefined) queryParams.set('$skip', String(params.skip));
+    if (params.orderBy) queryParams.set('$orderBy', params.orderBy);
+    if (params.warehouseId) queryParams.set('referencedWarehouse', params.warehouseId);
+    if (params.fulfillerId) queryParams.set('referencedFulfiller', params.fulfillerId);
+    
+    // Always select stock fields
+    queryParams.set('$select', 'jfsku,merchantSku,name,stock');
+    
+    // Add filter if provided
+    if (params.filter) queryParams.set('$filter', params.filter);
+
+    const query = queryParams.toString();
+    const endpoint = `/v1/merchant/products${query ? `?${query}` : ''}`;
+    
+    const response = await this.request<JTLProductsWithStockResponse>(endpoint);
+    return response.items || [];
+  }
+
+  /**
+   * Get all products with stock, handling pagination automatically
+   * Fetches all pages and returns combined results
+   */
+  async getAllProductsWithStock(params: {
+    warehouseId?: string;
+    fulfillerId?: string;
+    batchSize?: number;
+  } = {}): Promise<JTLProductWithStock[]> {
+    const batchSize = params.batchSize || 100;
+    const allProducts: JTLProductWithStock[] = [];
+    let skip = 0;
+    let hasMore = true;
+
+    while (hasMore) {
+      const products = await this.getProductsWithStock({
+        top: batchSize,
+        skip,
+        warehouseId: params.warehouseId,
+        fulfillerId: params.fulfillerId,
+        orderBy: 'modificationInfo/updatedAt desc',
+      });
+
+      allProducts.push(...products);
+
+      if (products.length < batchSize) {
+        hasMore = false;
+      } else {
+        skip += batchSize;
+        // Add delay to avoid rate limiting
+        await this.delay(200);
+      }
+    }
+
+    console.log(`[JTL] Fetched ${allProducts.length} products with stock levels`);
+    return allProducts;
   }
 
   /**

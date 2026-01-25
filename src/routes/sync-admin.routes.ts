@@ -11,6 +11,7 @@ import { ConflictResolutionService } from '../services/integrations/conflict-res
 import { ReturnSyncService } from '../services/integrations/return-sync.service.js';
 import { OrderOperationsService } from '../services/integrations/order-operations.service.js';
 import { JTLOrderSyncService } from '../services/integrations/jtl-order-sync.service.js';
+import { StockSyncService } from '../services/integrations/stock-sync.service.js';
 import { getQueue } from '../services/queue/sync-queue.service.js';
 
 const router = Router();
@@ -23,6 +24,7 @@ export function createSyncAdminRoutes(prisma: PrismaClient): Router {
   const returnService = new ReturnSyncService(prisma);
   const orderOpsService = new OrderOperationsService(prisma);
   const jtlOrderSyncService = new JTLOrderSyncService(prisma);
+  const stockSyncService = new StockSyncService(prisma);
 
   // ============= SYNC STATUS & MANAGEMENT =============
 
@@ -807,6 +809,113 @@ export function createSyncAdminRoutes(prisma: PrismaClient): Router {
       } else {
         res.status(400).json({ success: false, error: result.error });
       }
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // ============= STOCK SYNC (JTL FFN → DB) =============
+
+  /**
+   * Manually trigger stock sync from JTL-FFN for a client
+   * This fetches current stock levels from JTL FFN and updates the local DB
+   */
+  router.post('/clients/:clientId/sync-stock', authMiddleware, async (req: Request, res: Response) => {
+    try {
+      const { clientId } = req.params;
+      const { jfskus, forceUpdate } = req.body;
+
+      console.log(`[API] Manual stock sync requested for client ${clientId}`);
+
+      const result = await stockSyncService.syncStockForClient(clientId, {
+        jfskus,
+        forceUpdate,
+      });
+
+      res.json({
+        success: result.success,
+        data: {
+          clientId,
+          productsUpdated: result.productsUpdated,
+          productsUnchanged: result.productsUnchanged,
+          productsFailed: result.productsFailed,
+          syncedAt: result.syncedAt,
+          errors: result.errors,
+          details: result.details,
+        },
+      });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  /**
+   * Get stock sync status for a client
+   */
+  router.get('/clients/:clientId/stock-status', authMiddleware, async (req: Request, res: Response) => {
+    try {
+      const { clientId } = req.params;
+
+      const status = await stockSyncService.getStockSyncStatus(clientId);
+
+      res.json({
+        success: true,
+        data: {
+          clientId,
+          ...status,
+        },
+      });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  /**
+   * Poll inbounds and sync stock for a client
+   * This checks for closed inbounds and triggers stock sync if found
+   */
+  router.post('/clients/:clientId/poll-inbounds', authMiddleware, async (req: Request, res: Response) => {
+    try {
+      const { clientId } = req.params;
+
+      console.log(`[API] Manual inbound poll requested for client ${clientId}`);
+
+      const result = await stockSyncService.pollInboundUpdatesAndSyncStock(clientId);
+
+      res.json({
+        success: true,
+        data: {
+          clientId,
+          inboundsProcessed: result.inboundsProcessed,
+          stockSyncTriggered: result.stockSyncTriggered,
+          stockSyncResult: result.stockSyncResult ? {
+            productsUpdated: result.stockSyncResult.productsUpdated,
+            productsFailed: result.stockSyncResult.productsFailed,
+          } : null,
+        },
+      });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  /**
+   * Sync stock for all clients (admin only)
+   */
+  router.post('/stock/sync-all', authMiddleware, async (req: Request, res: Response) => {
+    try {
+      console.log('[API] Manual stock sync for all clients requested');
+
+      const result = await stockSyncService.syncStockForAllClients();
+
+      res.json({
+        success: true,
+        data: {
+          clientsProcessed: result.clientsProcessed,
+          totalProductsUpdated: result.totalProductsUpdated,
+          totalProductsFailed: result.totalProductsFailed,
+        },
+      });
     } catch (error: any) {
       res.status(500).json({ success: false, error: error.message });
     }

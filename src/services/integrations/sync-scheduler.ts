@@ -9,6 +9,7 @@ import { SyncOrchestrator } from './sync-orchestrator.js';
 import { SyncResult } from './types.js';
 import { getEncryptionService } from '../encryption.service.js';
 import { JTLService } from './jtl.service.js';
+import { StockSyncService } from './stock-sync.service.js';
 
 interface SchedulerConfig {
   /**
@@ -40,6 +41,18 @@ interface SchedulerConfig {
    * Default: 12 hours
    */
   tokenRefreshIntervalHours: number;
+
+  /**
+   * Interval for stock sync from JTL FFN in minutes
+   * Default: 15 minutes (safety net - inbound-triggered sync is faster)
+   */
+  stockSyncIntervalMinutes: number;
+
+  /**
+   * Interval for polling JTL inbounds for stock changes in minutes
+   * Default: 2 minutes (same as JTL poll - for near real-time stock updates)
+   */
+  inboundPollIntervalMinutes: number;
 }
 
 interface ChannelSyncState {
@@ -92,6 +105,9 @@ export class SyncScheduler {
   private fullSyncTimer?: NodeJS.Timeout;
   private jtlPollTimer?: NodeJS.Timeout;
   private tokenRefreshTimer?: NodeJS.Timeout;
+  private stockSyncTimer?: NodeJS.Timeout;
+  private inboundPollTimer?: NodeJS.Timeout;
+  private stockSyncService: StockSyncService;
   private isRunning = false;
 
   private static readonly DEFAULT_CONFIG: SchedulerConfig = {
@@ -100,11 +116,14 @@ export class SyncScheduler {
     jtlPollIntervalMinutes: 2,
     maxConcurrentSyncs: 3,
     tokenRefreshIntervalHours: 12,
+    stockSyncIntervalMinutes: 15,
+    inboundPollIntervalMinutes: 2,
   };
 
   constructor(prisma: PrismaClient, config?: Partial<SchedulerConfig>) {
     this.prisma = prisma;
     this.config = { ...SyncScheduler.DEFAULT_CONFIG, ...config };
+    this.stockSyncService = new StockSyncService(prisma);
   }
 
   /**
@@ -127,12 +146,16 @@ export class SyncScheduler {
     this.startFullSyncTimer();
     this.startJtlPollTimer();
     this.startTokenRefreshTimer();
+    this.startStockSyncTimer();
+    this.startInboundPollTimer();
 
     console.log('Sync scheduler started successfully');
     console.log(`- Incremental sync: every ${this.config.incrementalSyncIntervalMinutes} minutes`);
     console.log(`- Full sync: every ${this.config.fullSyncIntervalHours} hours`);
     console.log(`- JTL polling: every ${this.config.jtlPollIntervalMinutes} minutes`);
     console.log(`- Token refresh: every ${this.config.tokenRefreshIntervalHours} hours`);
+    console.log(`- Stock sync (safety net): every ${this.config.stockSyncIntervalMinutes} minutes`);
+    console.log(`- Inbound poll (stock trigger): every ${this.config.inboundPollIntervalMinutes} minutes`);
   }
 
   /**
@@ -164,6 +187,16 @@ export class SyncScheduler {
     if (this.tokenRefreshTimer) {
       clearInterval(this.tokenRefreshTimer);
       this.tokenRefreshTimer = undefined;
+    }
+
+    if (this.stockSyncTimer) {
+      clearInterval(this.stockSyncTimer);
+      this.stockSyncTimer = undefined;
+    }
+
+    if (this.inboundPollTimer) {
+      clearInterval(this.inboundPollTimer);
+      this.inboundPollTimer = undefined;
     }
 
     this.isRunning = false;
@@ -249,6 +282,94 @@ export class SyncScheduler {
     this.tokenRefreshTimer = setInterval(() => {
       this.refreshAllJTLTokens();
     }, intervalMs);
+  }
+
+  /**
+   * Start periodic stock sync timer (safety net)
+   * This ensures stock is synced even if inbound polling misses updates
+   */
+  private startStockSyncTimer(): void {
+    const intervalMs = this.config.stockSyncIntervalMinutes * 60 * 1000;
+
+    // Run on startup after a short delay (let other services initialize)
+    setTimeout(() => {
+      this.runStockSyncForAllClients();
+    }, 10000); // 10 second delay
+
+    this.stockSyncTimer = setInterval(() => {
+      this.runStockSyncForAllClients();
+    }, intervalMs);
+  }
+
+  /**
+   * Start inbound polling timer for event-driven stock sync
+   * When inbounds close (goods received), immediately sync stock
+   */
+  private startInboundPollTimer(): void {
+    const intervalMs = this.config.inboundPollIntervalMinutes * 60 * 1000;
+
+    // Run on startup after a short delay
+    setTimeout(() => {
+      this.pollInboundsAndSyncStock();
+    }, 15000); // 15 second delay
+
+    this.inboundPollTimer = setInterval(() => {
+      this.pollInboundsAndSyncStock();
+    }, intervalMs);
+  }
+
+  /**
+   * Run stock sync for all clients (periodic safety net)
+   */
+  async runStockSyncForAllClients(): Promise<void> {
+    console.log('[Scheduler] Starting periodic stock sync for all clients...');
+
+    try {
+      const result = await this.stockSyncService.syncStockForAllClients();
+      console.log(`[Scheduler] Stock sync completed: ${result.clientsProcessed} clients, ${result.totalProductsUpdated} products updated, ${result.totalProductsFailed} failed`);
+    } catch (error) {
+      console.error('[Scheduler] Stock sync failed:', error instanceof Error ? error.message : 'Unknown error');
+    }
+  }
+
+  /**
+   * Poll inbounds and sync stock when inbounds close
+   */
+  async pollInboundsAndSyncStock(): Promise<void> {
+    console.log('[Scheduler] Polling inbounds for stock changes...');
+
+    try {
+      const result = await this.stockSyncService.pollInboundsAndSyncForAllClients();
+      console.log(`[Scheduler] Inbound polling completed: ${result.clientsProcessed} clients, ${result.totalInboundsProcessed} inbounds, ${result.stockSyncsTriggered} stock syncs triggered`);
+    } catch (error) {
+      console.error('[Scheduler] Inbound polling failed:', error instanceof Error ? error.message : 'Unknown error');
+    }
+  }
+
+  /**
+   * Manually trigger stock sync for a specific client
+   */
+  async triggerStockSyncForClient(clientId: string): Promise<{
+    success: boolean;
+    productsUpdated: number;
+    errors: string[];
+  }> {
+    console.log(`[Scheduler] Manual stock sync triggered for client ${clientId}`);
+
+    try {
+      const result = await this.stockSyncService.syncStockForClient(clientId);
+      return {
+        success: result.success,
+        productsUpdated: result.productsUpdated,
+        errors: result.errors,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        productsUpdated: 0,
+        errors: [error instanceof Error ? error.message : 'Unknown error'],
+      };
+    }
   }
 
   /**
