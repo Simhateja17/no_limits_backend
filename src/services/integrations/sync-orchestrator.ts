@@ -1052,13 +1052,17 @@ export class SyncOrchestrator {
           });
 
           if (order) {
-            // Map JTL status to our order status
+            // Map JTL status to our order status and fulfillment state
             const newStatus = this.mapJTLStatusToOrderStatus(update.data.status);
+            const newFulfillmentState = this.mapJTLStatusToFulfillmentState(update.data.status);
+            
+            console.log(`[JTL] Order ${order.id} status update: JTL=${update.data.status} -> status=${newStatus}, fulfillmentState=${newFulfillmentState}`);
             
             await this.prisma.order.update({
               where: { id: order.id },
               data: {
                 status: newStatus,
+                fulfillmentState: newFulfillmentState as any, // Cast to enum type
                 lastJtlSync: new Date(),
               },
             });
@@ -1340,19 +1344,55 @@ export class SyncOrchestrator {
 
   /**
    * Map JTL outbound status to internal order status
+   * JTL statuses: Preparation, Pending, Acknowledged, Pickprocess, Locked, PartiallyShipped, Shipped, PartiallyCanceled, Canceled
    */
   private mapJTLStatusToOrderStatus(jtlStatus: string): OrderStatus {
     const statusMap: Record<string, OrderStatus> = {
+      'Preparation': 'PROCESSING',
+      'Pending': 'PROCESSING',
+      'Acknowledged': 'PROCESSING',
+      'Pickprocess': 'PROCESSING',
+      'Locked': 'ON_HOLD',
+      'PartiallyShipped': 'PARTIALLY_FULFILLED',
+      'Shipped': 'SHIPPED',
+      'PartiallyCanceled': 'PARTIALLY_FULFILLED',
+      'Canceled': 'CANCELLED',
+      // Legacy mappings for backwards compatibility
       'Created': 'PROCESSING',
       'Accepted': 'PROCESSING',
       'Processing': 'PROCESSING',
       'Packed': 'PROCESSING',
-      'Shipped': 'SHIPPED',
       'Delivered': 'DELIVERED',
       'Cancelled': 'CANCELLED',
     };
 
     return statusMap[jtlStatus] || 'PENDING';
+  }
+
+  /**
+   * Map JTL outbound status to internal fulfillment state
+   * This provides more granular tracking of the operational state
+   */
+  private mapJTLStatusToFulfillmentState(jtlStatus: string): string {
+    const stateMap: Record<string, string> = {
+      'Preparation': 'PENDING',
+      'Pending': 'READY_FOR_PICKING',
+      'Acknowledged': 'READY_FOR_PICKING',
+      'Pickprocess': 'PICKING',
+      'Locked': 'PENDING',
+      'PartiallyShipped': 'SHIPPED',
+      'Shipped': 'SHIPPED',
+      'PartiallyCanceled': 'PENDING',
+      'Canceled': 'PENDING',
+      // Legacy/additional mappings
+      'Created': 'PENDING',
+      'Accepted': 'READY_FOR_PICKING',
+      'Processing': 'PICKING',
+      'Packed': 'PACKED',
+      'Delivered': 'DELIVERED',
+    };
+
+    return stateMap[jtlStatus] || 'PENDING';
   }
 
   /**
