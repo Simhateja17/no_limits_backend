@@ -948,13 +948,9 @@ export class JTLPollingService {
         environment: config.environment as 'sandbox' | 'production',
       }, this.prisma, config.clientId_fk);
 
-      // NOTE: JTL FFN Merchant API does NOT have a stock endpoint!
-      // Stock endpoints (/v1/fulfiller/stocks) are only available to Fulfillers, not Merchants.
-      // As merchants, we get stock updates through:
-      // 1. Product sync (products include stock info when synced)
-      // 2. Outbound shipping notifications (when orders are fulfilled)
-      //
-      // Instead, we poll for outbound updates to track order fulfillment status
+      // Poll for outbound updates to track order fulfillment status
+      // Stock sync is handled separately by StockSyncService which uses
+      // GET /api/v1/merchant/products with $select=stock to get stock levels
       try {
         // Get the last sync time to only fetch recent updates
         const since = config.lastSyncAt?.toISOString();

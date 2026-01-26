@@ -1,12 +1,14 @@
 /**
  * Stock Sync Service
  * Synchronizes inventory/stock levels from JTL FFN to local database
+ * AND pushes stock changes to Shopify/WooCommerce
  *
  * JTL FFN is the source of truth for stock levels because:
  * 1. Products are created in Shopify/WooCommerce (without inventory)
  * 2. Products are synced to our DB and pushed to JTL FFN
  * 3. Warehouse receives inbound goods and counts inventory in JTL FFN
  * 4. This service pulls stock levels from JTL FFN back to our DB
+ * 5. Stock changes are then pushed to Shopify/WooCommerce
  *
  * Sync Strategies:
  * - Inbound-triggered: When inbound status changes to "closed", immediately fetch stock
@@ -17,6 +19,7 @@
 import { PrismaClient, SyncOrigin } from '@prisma/client';
 import { JTLService, JTLProductWithStock } from './jtl.service.js';
 import { getEncryptionService } from '../encryption.service.js';
+import { getQueue, QUEUE_NAMES } from '../queue/sync-queue.service.js';
 
 interface StockSyncResult {
   success: boolean;
@@ -237,6 +240,9 @@ export class StockSyncService {
             });
 
             console.log(`[StockSync] Updated ${localProduct.sku}: available ${localProduct.available} → ${newAvailable}, reserved ${localProduct.reserved} → ${newReserved}, announced ${localProduct.announced} → ${newAnnounced}`);
+
+            // Queue sync to Shopify/WooCommerce to push stock changes
+            await this.queueStockSyncToCommerce(localProduct.id);
           } else {
             result.productsUnchanged++;
           }
@@ -497,6 +503,76 @@ export class StockSyncService {
       totalAvailable: products.reduce((sum, p) => sum + p.available, 0),
       totalReserved: products.reduce((sum, p) => sum + p.reserved, 0),
     };
+  }
+
+  /**
+   * Queue stock sync to commerce platforms (Shopify/WooCommerce)
+   * This pushes stock level changes from JTL FFN to the storefronts
+   */
+  private async queueStockSyncToCommerce(productId: string): Promise<void> {
+    try {
+      const queue = getQueue();
+      if (!queue) {
+        console.warn(`[StockSync] Queue not available, skipping commerce sync for product ${productId}`);
+        return;
+      }
+
+      // Get product channels to determine which platforms to sync to
+      const productChannels = await this.prisma.productChannel.findMany({
+        where: { productId },
+        include: {
+          channel: {
+            select: {
+              id: true,
+              type: true,
+              isActive: true,
+            },
+          },
+        },
+      });
+
+      // Queue sync for each active channel
+      for (const pc of productChannels) {
+        if (!pc.channel.isActive) continue;
+
+        if (pc.channel.type === 'SHOPIFY') {
+          await queue.enqueue(
+            QUEUE_NAMES.PRODUCT_SYNC_TO_SHOPIFY,
+            {
+              productId,
+              channelId: pc.channel.id,
+              origin: 'jtl',
+              fieldsToSync: ['available', 'reserved'],
+            },
+            {
+              priority: 5, // Higher priority for stock updates
+              retryLimit: 3,
+              retryDelay: 30,
+            }
+          );
+          console.log(`[StockSync] Queued Shopify stock sync for product ${productId}`);
+        } else if (pc.channel.type === 'WOOCOMMERCE') {
+          await queue.enqueue(
+            QUEUE_NAMES.PRODUCT_SYNC_TO_WOOCOMMERCE,
+            {
+              productId,
+              channelId: pc.channel.id,
+              origin: 'jtl',
+              fieldsToSync: ['available', 'reserved'],
+            },
+            {
+              priority: 5,
+              retryLimit: 3,
+              retryDelay: 30,
+            }
+          );
+          console.log(`[StockSync] Queued WooCommerce stock sync for product ${productId}`);
+        }
+      }
+    } catch (error) {
+      console.error(`[StockSync] Failed to queue commerce sync for product ${productId}:`, error);
+      // Don't throw - stock is already updated in DB, commerce sync can be retried
+    }
   }
 }
 
