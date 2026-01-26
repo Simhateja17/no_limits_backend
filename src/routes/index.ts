@@ -17,6 +17,7 @@ import integrationsRoutes, {
   stopEnhancedSyncProcessors,
 } from './integrations.routes.js';
 import createSyncAdminRoutes from './sync-admin.routes.js';
+import taskMessagesRoutes from './task-messages.routes.js';
 import { prisma } from '../config/index.js';
 
 const router = Router();
@@ -40,6 +41,9 @@ router.use('/chat', chatRoutes);
 
 // Data routes (Products, Orders, Returns, Inbounds)
 router.use('/data', dataRoutes);
+
+// Task messages routes (Task-specific chat)
+router.use('/tasks', taskMessagesRoutes);
 
 // Shipping methods routes (JTL FFN shipping methods, mappings, mismatches)
 router.use('/shipping-methods', shippingMethodsRoutes);

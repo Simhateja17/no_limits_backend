@@ -188,10 +188,13 @@ model User {
   
   // Return processing
   processedReturns  Return[]          @relation("ProcessedBy")
-  
+
   // Notifications
   notifications     Notification[]
-  
+
+  // Task messages (for task-specific chat)
+  taskMessages      TaskMessage[]
+
   @@map("users")
 }
 
@@ -1329,8 +1332,28 @@ model Task {
   // Task created from chat message
   messageId       String?       @unique @map("message_id")
   fromMessage     ChatMessage?  @relation("TaskFromMessage", fields: [messageId], references: [id])
-  
+
+  // Task-specific chat messages
+  messages        TaskMessage[]
+
   @@map("tasks")
+}
+
+// Task Message (for task-specific chat between admin/employees)
+model TaskMessage {
+  id          String    @id @default(cuid())
+  content     String
+  createdAt   DateTime  @default(now())
+
+  // Relations
+  taskId      String    @map("task_id")
+  task        Task      @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  senderId    String    @map("sender_id")
+  sender      User      @relation(fields: [senderId], references: [id])
+
+  @@index([taskId, createdAt])
+  @@map("task_messages")
 }
 
 // Audit Log (for critical operations)

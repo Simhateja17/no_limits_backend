@@ -111,6 +111,52 @@ export const initializeSocket = (httpServer: HTTPServer): SocketIOServer => {
       });
     });
 
+    // ========== TASK CHAT HANDLERS ==========
+
+    // Handle joining task chat rooms
+    socket.on('task:join', (taskId: string) => {
+      socket.join(`task:${taskId}`);
+      console.log(`User ${user.email} joined task room ${taskId}`);
+
+      // Notify task room participants that user joined
+      socket.to(`task:${taskId}`).emit('task:userJoined', {
+        userId: user.userId,
+        taskId
+      });
+    });
+
+    // Handle leaving task chat rooms
+    socket.on('task:leave', (taskId: string) => {
+      socket.leave(`task:${taskId}`);
+      console.log(`User ${user.email} left task room ${taskId}`);
+
+      socket.to(`task:${taskId}`).emit('task:userLeft', {
+        userId: user.userId,
+        taskId
+      });
+    });
+
+    // Handle typing indicator for task chat
+    socket.on('task:typing', ({ taskId, isTyping }: { taskId: string; isTyping: boolean }) => {
+      socket.to(`task:${taskId}`).emit('task:typing', {
+        userId: user.userId,
+        taskId,
+        isTyping,
+        userName: user.email
+      });
+    });
+
+    // Handle new task message (for real-time broadcast)
+    socket.on('task:message', (data: any) => {
+      console.log(`New task message from ${user.email} in task ${data.taskId}`);
+
+      // Emit message to all users in the task room except sender
+      socket.to(`task:${data.taskId}`).emit('task:newMessage', {
+        ...data,
+        senderId: user.userId
+      });
+    });
+
     // Handle disconnect
     socket.on('disconnect', () => {
       console.log(`User disconnected: ${user.email} (${user.userId})`);
@@ -145,6 +191,11 @@ export const emitToUser = (userId: string, event: string, data: any) => {
 // Helper function to emit events to chat rooms
 export const emitToRoom = (roomId: string, event: string, data: any) => {
   io.to(`chat:${roomId}`).emit(event, data);
+};
+
+// Helper function to emit events to task chat rooms
+export const emitToTaskRoom = (taskId: string, event: string, data: any) => {
+  io.to(`task:${taskId}`).emit(event, data);
 };
 
 // Helper function to check if user is online
