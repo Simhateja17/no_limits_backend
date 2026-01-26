@@ -591,6 +591,159 @@ export class ProductSyncService {
   }
 
   /**
+   * Sync stock/inventory only to a specific channel
+   * Uses dedicated inventory APIs (not full product updates)
+   * This is more reliable and efficient for stock-only changes
+   */
+  async syncStockToChannel(
+    productId: string,
+    channelId: string,
+    options: {
+      available?: number;
+      reserved?: number;
+    } = {}
+  ): Promise<{ success: boolean; error?: string }> {
+    console.log(`[ProductSync] Syncing stock for product ${productId} to channel ${channelId}`);
+
+    try {
+      // Get product with channel info
+      const productChannel = await this.prisma.productChannel.findFirst({
+        where: {
+          productId,
+          channelId,
+          syncEnabled: true,
+          isActive: true,
+        },
+        include: {
+          product: {
+            select: {
+              id: true,
+              sku: true,
+              available: true,
+              reserved: true,
+            },
+          },
+          channel: true,
+        },
+      });
+
+      if (!productChannel) {
+        console.log(`[ProductSync] No active channel found for product ${productId}, channel ${channelId}`);
+        return { success: true }; // Not an error, just no channel to sync to
+      }
+
+      if (!productChannel.externalProductId) {
+        console.log(`[ProductSync] Product ${productId} not yet synced to channel ${channelId}, skipping stock sync`);
+        return { success: true }; // Product hasn't been pushed to channel yet
+      }
+
+      const stockToSync = options.available ?? productChannel.product.available;
+      const encryptionService = getEncryptionService();
+
+      if (productChannel.channel.type === 'SHOPIFY') {
+        await this.syncStockToShopify(
+          productChannel.externalProductId,
+          productChannel.channel.shopDomain,
+          productChannel.channel.accessToken,
+          stockToSync,
+          encryptionService
+        );
+      } else if (productChannel.channel.type === 'WOOCOMMERCE') {
+        await this.syncStockToWooCommerce(
+          productChannel.externalProductId,
+          productChannel.channel.apiUrl,
+          productChannel.channel.apiClientId,
+          productChannel.channel.apiClientSecret,
+          stockToSync,
+          encryptionService
+        );
+      }
+
+      // Update last sync time
+      await this.prisma.productChannel.update({
+        where: { id: productChannel.id },
+        data: { lastSyncAt: new Date() },
+      });
+
+      console.log(`[ProductSync] Stock synced successfully for product ${productId} to ${productChannel.channel.type}`);
+      return { success: true };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      console.error(`[ProductSync] Stock sync failed for product ${productId}:`, errorMessage);
+      return { success: false, error: errorMessage };
+    }
+  }
+
+  /**
+   * Sync stock to Shopify using the Inventory API
+   */
+  private async syncStockToShopify(
+    externalProductId: string | null,
+    shopDomain: string | null,
+    accessToken: string | null,
+    available: number,
+    encryptionService: ReturnType<typeof getEncryptionService>
+  ): Promise<void> {
+    if (!shopDomain || !accessToken || !externalProductId) {
+      throw new Error('Missing Shopify credentials or product ID');
+    }
+
+    // Use REST service directly for inventory operations
+    const { ShopifyService } = await import('./shopify.service.js');
+    const shopifyService = new ShopifyService({
+      shopDomain,
+      accessToken: encryptionService.decrypt(accessToken),
+    });
+
+    // Get the product to find inventory item ID
+    const productId = parseInt(externalProductId);
+    const product = await shopifyService.getProduct(productId);
+    
+    if (!product?.variants?.[0]?.inventory_item_id) {
+      throw new Error('Cannot find inventory_item_id for Shopify product');
+    }
+
+    const inventoryItemId = product.variants[0].inventory_item_id;
+    
+    // Get first location
+    const locations = await shopifyService.getLocations();
+    if (!locations || locations.length === 0) {
+      throw new Error('No Shopify locations found');
+    }
+    const locationId = locations[0].id;
+
+    // Set inventory level
+    await shopifyService.setInventoryLevel(inventoryItemId, locationId, available);
+    console.log(`[ProductSync] Set Shopify inventory: item=${inventoryItemId}, location=${locationId}, available=${available}`);
+  }
+
+  /**
+   * Sync stock to WooCommerce using the product stock API
+   */
+  private async syncStockToWooCommerce(
+    externalProductId: string | null,
+    apiUrl: string | null,
+    apiClientId: string | null,
+    apiClientSecret: string | null,
+    available: number,
+    encryptionService: ReturnType<typeof getEncryptionService>
+  ): Promise<void> {
+    if (!apiUrl || !apiClientId || !apiClientSecret || !externalProductId) {
+      throw new Error('Missing WooCommerce credentials or product ID');
+    }
+
+    const wooService = new WooCommerceService({
+      url: apiUrl,
+      consumerKey: encryptionService.decrypt(apiClientId),
+      consumerSecret: encryptionService.decrypt(apiClientSecret),
+    });
+
+    const productId = parseInt(externalProductId);
+    await wooService.updateProductStock(productId, available, true);
+    console.log(`[ProductSync] Set WooCommerce stock: product=${productId}, stock_quantity=${available}`);
+  }
+
+  /**
    * Push product to Shopify
    */
   private async pushToShopify(

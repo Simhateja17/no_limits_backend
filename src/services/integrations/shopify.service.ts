@@ -307,6 +307,16 @@ export class ShopifyService {
   // ============= INVENTORY =============
 
   /**
+   * Get all locations for the shop
+   */
+  async getLocations(): Promise<{ id: number; name: string; active: boolean }[]> {
+    const response = await this.request<{ locations: { id: number; name: string; active: boolean }[] }>(
+      '/locations.json'
+    );
+    return response.locations || [];
+  }
+
+  /**
    * Fetch inventory levels for an inventory item
    */
   async getInventoryLevels(inventoryItemId: number): Promise<{ inventory_level: { inventory_item_id: number; location_id: number; available: number }[] }> {

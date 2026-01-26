@@ -103,6 +103,35 @@ interface JTLProductsWithStockResponse {
   count?: number;
 }
 
+// Stock item from GET /api/v1/merchant/stocks endpoint
+interface JTLStockItem {
+  jfsku: string;
+  merchantSku?: string;
+  stockLevel: number;
+  stockLevelReserved: number;
+  stockLevelBlocked: number;
+  stockLevelAnnounced: number;
+  warehouses?: {
+    warehouseId: string;
+    fulfillerId: string;
+    stockLevel: number;
+    stockLevelAnnounced: number;
+    stockLevelReserved: number;
+    stockLevelBlocked: number;
+  }[];
+}
+
+// Response format from GET /api/v1/merchant/stocks
+interface JTLStocksResponse {
+  items: JTLStockItem[];
+  _page?: {
+    total: number;
+    limit: number;
+    offset: number;
+  };
+  count?: number;
+}
+
 export class JTLService {
   private credentials: JTLCredentials;
   private baseUrl: string;
@@ -654,18 +683,16 @@ export class JTLService {
    * Get all products with stock information using Products API
    * This is the proper way for merchants to get stock levels
    * 
-   * API: GET /api/v1/merchant/products
-   * Uses $select to include stock fields
+   * API: GET /api/v1/merchant/stocks
+   * Uses the dedicated stocks endpoint which returns stock per product
    * 
-   * Returns: Products with stock.stockLevel, stock.stockLevelReserved, etc.
+   * Returns: Stock info with jfsku, merchantSku, stockLevel, stockLevelReserved, etc.
    */
   async getProductsWithStock(params: {
     top?: number;
     skip?: number;
     filter?: string;
     orderBy?: string;
-    warehouseId?: string;
-    fulfillerId?: string;
   } = {}): Promise<JTLProductWithStock[]> {
     const queryParams = new URLSearchParams();
     
@@ -673,20 +700,27 @@ export class JTLService {
     if (params.top !== undefined) queryParams.set('$top', String(params.top));
     if (params.skip !== undefined) queryParams.set('$skip', String(params.skip));
     if (params.orderBy) queryParams.set('$orderBy', params.orderBy);
-    if (params.warehouseId) queryParams.set('referencedWarehouse', params.warehouseId);
-    if (params.fulfillerId) queryParams.set('referencedFulfiller', params.fulfillerId);
-    
-    // Always select stock fields
-    queryParams.set('$select', 'jfsku,merchantSku,name,stock');
     
     // Add filter if provided
     if (params.filter) queryParams.set('$filter', params.filter);
 
     const query = queryParams.toString();
-    const endpoint = `/v1/merchant/products${query ? `?${query}` : ''}`;
+    const endpoint = `/v1/merchant/stocks${query ? `?${query}` : ''}`;
     
-    const response = await this.request<JTLProductsWithStockResponse>(endpoint);
-    return response.items || [];
+    const response = await this.request<JTLStocksResponse>(endpoint);
+    
+    // Transform the stocks response to our expected format
+    return (response.items || []).map(stockItem => ({
+      jfsku: stockItem.jfsku,
+      merchantSku: stockItem.merchantSku || '',
+      name: '', // Not available from stocks endpoint, will need to lookup from products if needed
+      stock: {
+        stockLevel: stockItem.stockLevel || 0,
+        stockLevelReserved: stockItem.stockLevelReserved || 0,
+        stockLevelAnnounced: stockItem.stockLevelAnnounced || 0,
+        stockLevelBlocked: stockItem.stockLevelBlocked || 0,
+      },
+    }));
   }
 
   /**
@@ -694,8 +728,6 @@ export class JTLService {
    * Fetches all pages and returns combined results
    */
   async getAllProductsWithStock(params: {
-    warehouseId?: string;
-    fulfillerId?: string;
     batchSize?: number;
   } = {}): Promise<JTLProductWithStock[]> {
     const batchSize = params.batchSize || 100;
@@ -707,9 +739,6 @@ export class JTLService {
       const products = await this.getProductsWithStock({
         top: batchSize,
         skip,
-        warehouseId: params.warehouseId,
-        fulfillerId: params.fulfillerId,
-        orderBy: 'modificationInfo/updatedAt desc',
       });
 
       allProducts.push(...products);

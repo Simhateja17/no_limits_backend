@@ -539,7 +539,36 @@ export const getRecentMessages = async (req: Request, res: Response): Promise<vo
 
     // Build query based on user role
     let messages;
-    if (currentUserRole === 'CLIENT') {
+    const isAdmin = currentUserRole === 'ADMIN' || currentUserRole === 'SUPER_ADMIN';
+
+    if (isAdmin) {
+      // Admins can see all messages from all chat rooms
+      messages = await prisma.chatMessage.findMany({
+        take: messageLimit,
+        orderBy: { createdAt: 'desc' },
+        include: {
+          sender: {
+            select: {
+              id: true,
+              name: true,
+              avatar: true,
+              role: true,
+            },
+          },
+          chatRoom: {
+            include: {
+              client: {
+                select: {
+                  id: true,
+                  name: true,
+                  companyName: true,
+                },
+              },
+            },
+          },
+        },
+      });
+    } else if (currentUserRole === 'CLIENT') {
       // Clients can only see messages from their own chat room
       const clientId = req.user?.clientId;
       if (!clientId) {
@@ -581,8 +610,17 @@ export const getRecentMessages = async (req: Request, res: Response): Promise<vo
         },
       });
     } else {
-      // Admins and employees can see all messages
+      // Employees can only see messages from chat rooms where they are a participant
       messages = await prisma.chatMessage.findMany({
+        where: {
+          chatRoom: {
+            participants: {
+              some: {
+                userId: currentUserId,
+              },
+            },
+          },
+        },
         take: messageLimit,
         orderBy: { createdAt: 'desc' },
         include: {

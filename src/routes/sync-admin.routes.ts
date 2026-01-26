@@ -900,6 +900,51 @@ export function createSyncAdminRoutes(prisma: PrismaClient): Router {
   });
 
   /**
+   * Sync stock from JTL-FFN (flexible endpoint)
+   * If clientId is provided in body, syncs for that client
+   * If no clientId, syncs for all clients (admin function)
+   */
+  router.post('/stock/sync', authMiddleware, async (req: Request, res: Response) => {
+    try {
+      const { clientId } = req.body;
+
+      if (clientId) {
+        // Sync for specific client
+        console.log(`[API] Stock sync requested for client ${clientId}`);
+        const result = await stockSyncService.syncStockForClient(clientId);
+
+        res.json({
+          success: result.success,
+          productsUpdated: result.productsUpdated,
+          productsUnchanged: result.productsUnchanged,
+          productsFailed: result.productsFailed,
+          errors: result.errors,
+        });
+      } else {
+        // Sync for all clients
+        console.log('[API] Stock sync for all clients requested');
+        const result = await stockSyncService.syncStockForAllClients();
+
+        res.json({
+          success: true,
+          productsUpdated: result.totalProductsUpdated,
+          productsUnchanged: 0, // Not tracked at aggregate level
+          productsFailed: result.totalProductsFailed,
+          errors: [],
+        });
+      }
+    } catch (error: any) {
+      res.status(500).json({
+        success: false,
+        productsUpdated: 0,
+        productsUnchanged: 0,
+        productsFailed: 0,
+        errors: [error.message],
+      });
+    }
+  });
+
+  /**
    * Sync stock for all clients (admin only)
    */
   router.post('/stock/sync-all', authMiddleware, async (req: Request, res: Response) => {

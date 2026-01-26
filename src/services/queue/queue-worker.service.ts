@@ -134,7 +134,25 @@ export class QueueWorkerService {
         console.log(`[QueueWorker] Processing product sync to Shopify: ${productId}`);
 
         try {
-            // Use ProductSyncService to push product to Shopify
+            // Check if this is a stock-only sync
+            const isStockOnlySync = fieldsToSync && 
+                fieldsToSync.length > 0 && 
+                fieldsToSync.every(f => ['available', 'reserved'].includes(f));
+
+            if (isStockOnlySync && channelId) {
+                // Use dedicated stock sync method for better reliability
+                console.log(`[QueueWorker] Using stock-only sync for Shopify`);
+                const result = await this.productSyncService.syncStockToChannel(productId, channelId);
+                
+                if (!result.success) {
+                    console.error(`[QueueWorker] Stock sync to Shopify failed:`, result.error);
+                    return { success: false, error: result.error };
+                }
+
+                return { success: true, details: { action: 'stock_updated' } };
+            }
+
+            // Full product sync
             const result = await this.productSyncService.pushProductToAllPlatforms(
                 productId,
                 'nolimits',
@@ -169,7 +187,25 @@ export class QueueWorkerService {
         console.log(`[QueueWorker] Processing product sync to WooCommerce: ${productId}`);
 
         try {
-            // Use ProductSyncService to push product to WooCommerce
+            // Check if this is a stock-only sync
+            const isStockOnlySync = fieldsToSync && 
+                fieldsToSync.length > 0 && 
+                fieldsToSync.every(f => ['available', 'reserved'].includes(f));
+
+            if (isStockOnlySync && channelId) {
+                // Use dedicated stock sync method for better reliability
+                console.log(`[QueueWorker] Using stock-only sync for WooCommerce`);
+                const result = await this.productSyncService.syncStockToChannel(productId, channelId);
+                
+                if (!result.success) {
+                    console.error(`[QueueWorker] Stock sync to WooCommerce failed:`, result.error);
+                    return { success: false, error: result.error };
+                }
+
+                return { success: true, details: { action: 'stock_updated' } };
+            }
+
+            // Full product sync
             const result = await this.productSyncService.pushProductToAllPlatforms(
                 productId,
                 'nolimits',

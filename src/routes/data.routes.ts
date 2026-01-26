@@ -332,6 +332,7 @@ router.get('/dashboard/events', async (req: Request, res: Response) => {
         id: true,
         orderId: true,
         orderNumber: true,
+        externalOrderId: true,
         status: true,
         createdAt: true,
       },
@@ -376,7 +377,7 @@ router.get('/dashboard/events', async (req: Request, res: Response) => {
 
     // Add orders needing attention
     ordersNeedingAttention.forEach((order) => {
-      const orderNum = order.orderNumber || order.orderId;
+      const orderNum = order.externalOrderId || order.orderNumber || order.orderId;
       events.push({
         id: `order-${order.id}`,
         type: 'order_attention',

@@ -125,17 +125,9 @@ export class StockSyncService {
         return result;
       }
 
-      // Get JTL config to get warehouseId and fulfillerId
-      const jtlConfig = await this.prisma.jtlConfig.findUnique({
-        where: { clientId_fk: clientId },
-      });
-
-      // Fetch products with stock from JTL FFN using the Products API
+      // Fetch products with stock from JTL FFN using the dedicated Stocks API
       // This is the proper way to get stock levels for merchants
-      const jtlProducts = await jtlService.getAllProductsWithStock({
-        warehouseId: jtlConfig?.warehouseId,
-        fulfillerId: jtlConfig?.fulfillerId,
-      });
+      const jtlProducts = await jtlService.getAllProductsWithStock();
       console.log(`[StockSync] Fetched ${jtlProducts.length} products with stock from JTL FFN`);
 
       if (jtlProducts.length === 0) {
