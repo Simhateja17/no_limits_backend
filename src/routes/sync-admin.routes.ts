@@ -785,7 +785,72 @@ export function createSyncAdminRoutes(prisma: PrismaClient): Router {
   });
 
   /**
-   * Poll JTL-FFN for order updates
+   * Poll JTL-FFN for order updates (all clients)
+   */
+  router.post('/poll-ffn', authMiddleware, async (req: Request, res: Response) => {
+    try {
+      const { since } = req.body;
+      
+      // Get all clients with JTL config
+      const clientsWithJtl = await prisma.client.findMany({
+        where: {
+          jtlConfig: {
+            isNot: null
+          }
+        },
+        select: { id: true, name: true }
+      });
+
+      let totalUpdates = 0;
+      const results: { clientId: string; clientName: string; updates: number; error?: string }[] = [];
+
+      for (const client of clientsWithJtl) {
+        try {
+          const result = await jtlOrderSyncService.pollFFNUpdates(
+            client.id,
+            since ? new Date(since) : undefined
+          );
+          
+          if (result.success) {
+            totalUpdates += result.updatesProcessed || 0;
+            results.push({
+              clientId: client.id,
+              clientName: client.name,
+              updates: result.updatesProcessed || 0
+            });
+          } else {
+            results.push({
+              clientId: client.id,
+              clientName: client.name,
+              updates: 0,
+              error: result.error
+            });
+          }
+        } catch (clientError: any) {
+          results.push({
+            clientId: client.id,
+            clientName: client.name,
+            updates: 0,
+            error: clientError.message
+          });
+        }
+      }
+
+      res.json({
+        success: true,
+        data: {
+          updatesProcessed: totalUpdates,
+          message: `Processed ${totalUpdates} updates from JTL-FFN across ${clientsWithJtl.length} clients`,
+          details: results,
+        },
+      });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  /**
+   * Poll JTL-FFN for order updates (single client)
    */
   router.post('/clients/:clientId/poll-ffn', authMiddleware, async (req: Request, res: Response) => {
     try {
