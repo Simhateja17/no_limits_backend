@@ -116,6 +116,10 @@ export class ChannelDataService {
 
       try {
         channelMethods = await this.fetchChannelShippingMethods(channel);
+        console.log(`[ChannelDataService] Fetched ${channelMethods.length} shipping methods from ${channel.type} for channel ${channelId}`);
+        if (channelMethods.length > 0) {
+          console.log(`[ChannelDataService] Shipping methods:`, channelMethods.map(m => m.name).join(', '));
+        }
       } catch (err) {
         console.warn(`[ChannelDataService] Could not fetch shipping methods from ${channel.type}:`, err);
         // Return empty array but don't fail the whole request
@@ -197,6 +201,45 @@ export class ChannelDataService {
     // For other channel types, return empty array
     console.warn(`[ChannelDataService] Unsupported channel type for shipping methods: ${channel.type}`);
     return [];
+  }
+
+  /**
+   * Get existing shipping method mappings for a channel
+   * Returns mappings in the format: warehouseMethodId -> channelMethodName
+   */
+  async getShippingMappingsForChannel(channelId: string): Promise<{
+    success: boolean;
+    mappings: Record<string, string>;
+    error?: string;
+  }> {
+    try {
+      const mappings = await this.prisma.shippingMethodMapping.findMany({
+        where: { channelId },
+        include: {
+          shippingMethod: {
+            select: { id: true, name: true }
+          }
+        }
+      });
+
+      // Convert to format: { warehouseMethodId: channelMethodName }
+      const result = mappings.reduce((acc, m) => {
+        acc[m.shippingMethodId] = m.channelShippingTitle;
+        return acc;
+      }, {} as Record<string, string>);
+
+      return {
+        success: true,
+        mappings: result,
+      };
+    } catch (error: any) {
+      console.error('[ChannelDataService] Error fetching shipping mappings:', error);
+      return {
+        success: false,
+        mappings: {},
+        error: error.message,
+      };
+    }
   }
 
   /**

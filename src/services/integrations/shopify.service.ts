@@ -995,7 +995,9 @@ export class ShopifyService {
       shipping_zone_id: number;
     }>;
   }>> {
+    console.log(`[Shopify REST API] Fetching shipping zones from ${this.credentials.shopDomain}...`);
     const response = await this.request<{ shipping_zones: Array<any> }>('/shipping_zones.json');
+    console.log(`[Shopify REST API] Received ${response.shipping_zones?.length || 0} shipping zones`);
     return response.shipping_zones;
   }
 
@@ -1063,7 +1065,9 @@ export class ShopifyService {
         }
       }
 
-      return Array.from(uniqueMethods.values());
+      const result = Array.from(uniqueMethods.values());
+      console.log(`[Shopify] Returning ${result.length} unique shipping methods:`, result.map(m => m.name).join(', '));
+      return result;
     } catch (error) {
       console.error('[Shopify] Error fetching shipping methods:', error);
       return [];

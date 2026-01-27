@@ -1954,6 +1954,43 @@ router.get('/shipping-methods/:channelId', authenticate, async (req: Request, re
 });
 
 /**
+ * Get existing shipping method mappings for a channel
+ */
+router.get('/channels/:channelId/shipping-mappings', authenticate, async (req: Request, res: Response) => {
+  try {
+    const { channelId } = req.params;
+
+    if (!channelId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required parameter: channelId',
+      });
+    }
+
+    const channelDataService = new ChannelDataService(prisma);
+    const result = await channelDataService.getShippingMappingsForChannel(channelId);
+
+    if (!result.success) {
+      return res.status(400).json({
+        success: false,
+        error: result.error,
+      });
+    }
+
+    res.json({
+      success: true,
+      mappings: result.mappings,
+    });
+  } catch (error) {
+    console.error('Error fetching shipping mappings:', error);
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+});
+
+/**
  * Save shipping method mappings for a channel
  * Maps channel shipping methods (from Shopify/WooCommerce) to warehouse methods (JTL FFN)
  */
