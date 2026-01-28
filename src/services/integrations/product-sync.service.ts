@@ -451,6 +451,8 @@ export class ProductSyncService {
   ): Promise<ProductSyncResult> {
     console.log(`[ProductSync] Pushing product ${productId} to all platforms`);
 
+    // Fetch product with all necessary fields for sync
+    // Note: Using include without select automatically includes all scalar fields
     const product = await this.prisma.product.findUnique({
       where: { id: productId },
       include: {
@@ -464,6 +466,8 @@ export class ProductSyncService {
         },
       },
     });
+
+    console.log(`[ProductSync] Fetched product ${productId}, jtlProductId: ${(product as any)?.jtlProductId || 'NULL'}`);
 
     if (!product) {
       return {
@@ -530,8 +534,11 @@ export class ProductSyncService {
     // Push to JTL if configured and not skipped
     if (product.client.jtlConfig && !skipPlatforms.includes('jtl')) {
       try {
+        // Log the product's current jtlProductId for debugging
+        console.log(`[ProductSync] Product ${product.sku} has jtlProductId: ${product.jtlProductId || 'NULL'}, syncStatus: ${product.jtlSyncStatus || 'NULL'}`);
+
         const jtlId = await this.pushToJTL(product, product.client.jtlConfig, options.fieldsToSync);
-        
+
         await this.prisma.product.update({
           where: { id: productId },
           data: {
@@ -1041,7 +1048,35 @@ export class ProductSyncService {
       },
     ];
 
-    // JTL product data matching n8n workflow structure
+    // Check if product already exists in JTL (has jtlProductId)
+    if (product.jtlProductId) {
+      // Product already exists in JTL - UPDATE it using PATCH
+      console.log(`[ProductSync] Updating existing JTL product ${product.jtlProductId} (SKU: ${product.sku})`);
+
+      const updateResult = await jtlService.updateProduct(product.jtlProductId, {
+        name: product.name,
+        description: product.description || undefined,
+        weight: product.weightInKg ? Number(product.weightInKg) : undefined,
+        height: product.heightInCm ? Number(product.heightInCm) / 100 : undefined,
+        length: product.lengthInCm ? Number(product.lengthInCm) / 100 : undefined,
+        width: product.widthInCm ? Number(product.widthInCm) / 100 : undefined,
+        identifier: {
+          ean: product.gtin || undefined,
+          han: product.han || undefined,
+        },
+      });
+
+      if (updateResult.success) {
+        console.log(`[ProductSync] Successfully updated JTL product ${product.jtlProductId}`);
+        return product.jtlProductId;
+      } else {
+        throw new Error(updateResult.error || 'Failed to update product in JTL');
+      }
+    }
+
+    // Product doesn't exist in JTL yet - CREATE it
+    console.log(`[ProductSync] Creating new JTL product for SKU: ${product.sku}`);
+
     const jtlProduct = {
       name: product.name,
       merchantSku: product.sku,
@@ -1058,6 +1093,7 @@ export class ProductSyncService {
     };
 
     const result = await jtlService.createProduct(jtlProduct);
+    console.log(`[ProductSync] Successfully created JTL product ${result.jfsku} for SKU: ${product.sku}`);
     return result.jfsku;
   }
 
@@ -1634,6 +1670,113 @@ export class ProductSyncService {
       failed,
       errors,
     };
+  }
+
+  /**
+   * Pull products FROM JTL FFN and update local database with jtlProductId
+   * This resolves "duplicate product" errors by syncing JTL's existing products back to local DB
+   */
+  async pullProductsFromJTL(clientId: string): Promise<{
+    totalJtlProducts: number;
+    matched: number;
+    updated: number;
+    notFound: number;
+    errors: string[];
+  }> {
+    console.log(`[ProductSync] Pulling products from JTL for client ${clientId}`);
+
+    const result = {
+      totalJtlProducts: 0,
+      matched: 0,
+      updated: 0,
+      notFound: 0,
+      errors: [] as string[],
+    };
+
+    try {
+      // Get JTL config for this client
+      const jtlConfig = await this.prisma.jtlConfig.findUnique({
+        where: { clientId_fk: clientId },
+      });
+
+      if (!jtlConfig || !jtlConfig.isActive || !jtlConfig.accessToken) {
+        result.errors.push('No active JTL configuration found');
+        return result;
+      }
+
+      // Create JTL service
+      const encryptionService = getEncryptionService();
+      const jtlService = new JTLService({
+        clientId: jtlConfig.clientId,
+        clientSecret: encryptionService.decrypt(jtlConfig.clientSecret),
+        accessToken: encryptionService.decrypt(jtlConfig.accessToken),
+        refreshToken: jtlConfig.refreshToken ? encryptionService.decrypt(jtlConfig.refreshToken) : undefined,
+        tokenExpiresAt: jtlConfig.tokenExpiresAt || undefined,
+        fulfillerId: jtlConfig.fulfillerId,
+        warehouseId: jtlConfig.warehouseId,
+        environment: jtlConfig.environment as 'sandbox' | 'production',
+      }, this.prisma, clientId);
+
+      // Fetch ALL products from JTL FFN
+      console.log(`[ProductSync] Fetching all products from JTL FFN...`);
+      const jtlProducts = await jtlService.getAllProductsWithStock();
+      result.totalJtlProducts = jtlProducts.length;
+      console.log(`[ProductSync] Found ${jtlProducts.length} products in JTL FFN`);
+
+      // Get all local products for this client
+      const localProducts = await this.prisma.product.findMany({
+        where: { clientId },
+        select: {
+          id: true,
+          sku: true,
+          jtlProductId: true,
+          jtlSyncStatus: true,
+        },
+      });
+
+      // Create a map for fast lookup by SKU
+      const localProductMap = new Map(localProducts.map(p => [p.sku, p]));
+
+      // Match JTL products with local products by merchantSku (maps to our SKU)
+      for (const jtlProduct of jtlProducts) {
+        const localProduct = localProductMap.get(jtlProduct.merchantSku);
+
+        if (!localProduct) {
+          result.notFound++;
+          console.log(`[ProductSync] JTL product ${jtlProduct.jfsku} (SKU: ${jtlProduct.merchantSku}) not found in local DB`);
+          continue;
+        }
+
+        result.matched++;
+
+        // Check if we need to update
+        if (localProduct.jtlProductId !== jtlProduct.jfsku) {
+          try {
+            // Update local product with JTL product ID
+            await this.prisma.product.update({
+              where: { id: localProduct.id },
+              data: {
+                jtlProductId: jtlProduct.jfsku,
+                jtlSyncStatus: 'SYNCED',
+                lastJtlSync: new Date(),
+              },
+            });
+
+            result.updated++;
+            console.log(`[ProductSync] Updated product ${localProduct.sku} with jtlProductId: ${jtlProduct.jfsku}`);
+          } catch (error) {
+            result.errors.push(`Failed to update ${localProduct.sku}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+          }
+        }
+      }
+
+      console.log(`[ProductSync] Pull complete: ${result.matched} matched, ${result.updated} updated, ${result.notFound} not found in local DB`);
+      return result;
+    } catch (error) {
+      console.error(`[ProductSync] Error pulling products from JTL:`, error);
+      result.errors.push(error instanceof Error ? error.message : 'Unknown error');
+      return result;
+    }
   }
 
   /**

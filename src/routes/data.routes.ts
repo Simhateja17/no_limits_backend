@@ -56,6 +56,9 @@ router.get('/products', async (req: Request, res: Response) => {
         announced: true,
         weightInKg: true,
         imageUrl: true,
+        jtlProductId: true,
+        jtlSyncStatus: true,
+        lastJtlSync: true,
         client: {
           select: {
             companyName: true,
@@ -1526,8 +1529,22 @@ router.post('/inbounds', async (req: Request, res: Response) => {
       items, // Array of { productId, quantity }
     } = req.body;
 
+    console.log('[Inbound] ========== CREATE INBOUND REQUEST ==========');
+    console.log('[Inbound] User ID:', userId);
+    console.log('[Inbound] Request body:', JSON.stringify({
+      deliveryType,
+      expectedDate,
+      carrierName,
+      trackingNumber,
+      notes,
+      simulateStock,
+      itemsCount: items?.length,
+      items,
+    }, null, 2));
+
     // Validate required fields
     if (!items || !Array.isArray(items) || items.length === 0) {
+      console.log('[Inbound] ERROR: No items provided');
       return res.status(400).json({
         success: false,
         error: 'At least one product is required',
@@ -1540,6 +1557,7 @@ router.post('/inbounds', async (req: Request, res: Response) => {
     });
 
     if (!user || !user.client) {
+      console.log('[Inbound] ERROR: User or client not found for userId:', userId);
       return res.status(404).json({
         success: false,
         error: 'User or client not found',
@@ -1547,6 +1565,7 @@ router.post('/inbounds', async (req: Request, res: Response) => {
     }
 
     const clientId = user.client.id;
+    console.log('[Inbound] Client ID:', clientId, '| Company:', user.client.companyName);
 
     // Generate inbound ID
     const count = await prisma.inboundDelivery.count({
@@ -1562,8 +1581,10 @@ router.post('/inbounds', async (req: Request, res: Response) => {
     const mappedDeliveryType = validDeliveryTypes.includes(deliveryType?.toUpperCase())
       ? deliveryType.toUpperCase()
       : 'PARCEL_SERVICE';
+    console.log('[Inbound] Mapped delivery type:', deliveryType, '->', mappedDeliveryType);
 
     // Create the inbound delivery with items
+    console.log('[Inbound] Creating inbound in database...');
     const inbound = await prisma.inboundDelivery.create({
       data: {
         inboundId,
@@ -1604,12 +1625,125 @@ router.post('/inbounds', async (req: Request, res: Response) => {
       },
     });
 
+    console.log('[Inbound] ✓ Inbound created in database');
+    console.log('[Inbound] Inbound ID:', inbound.inboundId);
+    console.log('[Inbound] Database ID:', inbound.id);
+    console.log('[Inbound] Items created:', inbound.items.length);
+
+    // Sync to JTL FFN if configured
+    let jtlSyncResult = null;
+    let jtlInboundId = null;
+
+    try {
+      // Check if client has JTL configured
+      console.log('[Inbound] Checking JTL FFN configuration for client...');
+      const jtlConfig = await prisma.jtlConfig.findUnique({
+        where: { clientId_fk: clientId },
+      });
+
+      console.log('[Inbound] JTL Config found:', jtlConfig ? 'Yes' : 'No');
+      if (jtlConfig) {
+        console.log('[Inbound] JTL Config active:', jtlConfig.isActive);
+        console.log('[Inbound] JTL Warehouse ID:', jtlConfig.warehouseId || 'NOT SET');
+      }
+
+      if (jtlConfig && jtlConfig.isActive && jtlConfig.warehouseId) {
+        const { getEncryptionService } = await import('../services/encryption.service.js');
+        const { JTLService } = await import('../services/integrations/jtl.service.js');
+
+        const encryptionService = getEncryptionService();
+        const jtlService = new JTLService({
+          clientId: jtlConfig.clientId,
+          clientSecret: encryptionService.decrypt(jtlConfig.clientSecret),
+          accessToken: jtlConfig.accessToken ? encryptionService.decrypt(jtlConfig.accessToken) : undefined,
+          refreshToken: jtlConfig.refreshToken ? encryptionService.decrypt(jtlConfig.refreshToken) : undefined,
+          tokenExpiresAt: jtlConfig.tokenExpiresAt || undefined,
+          environment: jtlConfig.environment as 'sandbox' | 'production',
+        });
+
+        // Get products with their JTL product IDs (jfsku)
+        console.log('[JTL] Fetching products with JTL IDs...');
+        const productIds = items.map((item: { productId: string }) => item.productId);
+        const products = await prisma.product.findMany({
+          where: { id: { in: productIds } },
+          select: { id: true, jtlProductId: true, sku: true },
+        });
+        console.log('[JTL] Products found:', products.length);
+        console.log('[JTL] Products with JTL IDs:', products.filter(p => p.jtlProductId).length);
+        products.forEach(p => {
+          console.log(`[JTL]   - SKU: ${p.sku}, JTL ID: ${p.jtlProductId || 'NOT SET'}`);
+        });
+
+        // Build JTL inbound items
+        const jtlItems = items.map((item: { productId: string; quantity: number }, index: number) => {
+          const product = products.find(p => p.id === item.productId);
+          return {
+            inboundItemId: `${inboundId}-ITEM-${index + 1}`,
+            jfsku: product?.jtlProductId || '',
+            merchantSku: product?.sku || '',
+            quantity: item.quantity,
+          };
+        }).filter(item => item.jfsku); // Only include items with valid jfsku
+
+        console.log('[JTL] JTL items to sync:', jtlItems.length);
+
+        if (jtlItems.length > 0) {
+          // Create inbound in JTL FFN
+          const jtlInbound = {
+            merchantInboundNumber: inboundId,
+            warehouseId: jtlConfig.warehouseId,
+            items: jtlItems,
+            note: notes || undefined,
+          };
+
+          console.log('[JTL] Creating inbound:', JSON.stringify(jtlInbound, null, 2));
+
+          const jtlResponse = await jtlService.createInbound(jtlInbound);
+          jtlInboundId = jtlResponse.inboundId;
+          jtlSyncResult = { success: true, inboundId: jtlInboundId };
+
+          console.log('[JTL] Inbound created successfully:', jtlInboundId);
+
+          // Update our inbound with JTL ID
+          await prisma.inboundDelivery.update({
+            where: { id: inbound.id },
+            data: {
+              jtlDeliveryId: jtlInboundId,
+              lastJtlSync: new Date(),
+            },
+          });
+          console.log('[JTL] ✓ Database updated with JTL inbound ID');
+        } else {
+          console.log('[JTL] No products with JTL IDs found, skipping JTL sync');
+        }
+      } else {
+        console.log('[JTL] JTL FFN sync skipped - not configured or inactive');
+      }
+    } catch (jtlError: any) {
+      console.error('[JTL] Error syncing inbound to JTL FFN:', jtlError);
+      console.error('[JTL] Error details:', jtlError.stack || jtlError);
+      jtlSyncResult = { success: false, error: jtlError.message };
+      // Don't fail the request - the local inbound was created successfully
+    }
+
+    console.log('[Inbound] ========== CREATE INBOUND COMPLETE ==========');
+    console.log('[Inbound] Inbound ID:', inbound.inboundId);
+    console.log('[Inbound] JTL Sync:', jtlSyncResult ? (jtlSyncResult.success ? '✓ Success' : '✗ Failed') : 'Skipped');
+    if (jtlInboundId) {
+      console.log('[Inbound] JTL Inbound ID:', jtlInboundId);
+    }
+
     res.status(201).json({
       success: true,
-      data: inbound,
+      data: {
+        ...inbound,
+        jtlDeliveryId: jtlInboundId,
+      },
+      jtlSync: jtlSyncResult,
     });
   } catch (error) {
-    console.error('Error creating inbound:', error);
+    console.error('[Inbound] ========== CREATE INBOUND FAILED ==========');
+    console.error('[Inbound] Error creating inbound:', error);
     res.status(500).json({
       success: false,
       error: error instanceof Error ? error.message : 'Failed to create inbound',

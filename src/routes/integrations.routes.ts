@@ -2640,6 +2640,34 @@ router.post('/product-sync/client/:clientId/full-sync', authenticate, async (req
 });
 
 /**
+ * Pull products FROM JTL FFN to update local database with jtlProductId
+ * This resolves "duplicate product" errors
+ */
+router.post('/product-sync/client/:clientId/pull-from-jtl', authenticate, async (req: Request, res: Response) => {
+  try {
+    const { clientId } = req.params;
+
+    if (!productSyncService) {
+      productSyncService = new ProductSyncService(prisma);
+    }
+
+    const result = await productSyncService.pullProductsFromJTL(clientId);
+
+    res.json({
+      success: result.errors.length === 0,
+      message: `Pulled ${result.totalJtlProducts} products from JTL: ${result.matched} matched, ${result.updated} updated`,
+      data: result,
+    });
+  } catch (error) {
+    console.error('Error pulling products from JTL:', error);
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+});
+
+/**
  * Get sync queue processor metrics
  */
 router.get('/product-sync/metrics', authenticate, (req: Request, res: Response) => {
