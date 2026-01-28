@@ -55,6 +55,7 @@ export class ShippingMethodService {
   async syncShippingMethodsFromJTL(jtlService: JTLService, fulfillerId?: string): Promise<{
     success: boolean;
     synced: number;
+    deactivated: number;
     error?: string;
   }> {
     try {
@@ -87,7 +88,7 @@ export class ShippingMethodService {
 
       if (!response.success || !response.data) {
         console.error('[ShippingMethodService] Failed to fetch shipping methods from JTL:', response.error);
-        return { success: false, synced: 0, error: response.error || 'Failed to fetch shipping methods' };
+        return { success: false, synced: 0, deactivated: 0, error: response.error || 'Failed to fetch shipping methods' };
       }
 
       const jtlMethods = response.data as JTLShippingMethod[];
@@ -95,10 +96,15 @@ export class ShippingMethodService {
       if (jtlMethods.length > 0) {
         console.log('[ShippingMethodService] First method sample:', JSON.stringify(jtlMethods[0], null, 2));
       }
+      
+      // Get the list of JTL shipping method IDs that are currently valid
+      const validJtlMethodIds = jtlMethods.map(m => m.shippingMethodId);
+      console.log('[ShippingMethodService] Valid JTL method IDs:', validJtlMethodIds);
+      
       let syncedCount = 0;
 
       for (const jtlMethod of jtlMethods) {
-        // Upsert shipping method
+        // Upsert shipping method - also ensure isActive is true for synced methods
         await this.prisma.shippingMethod.upsert({
           where: { jtlShippingMethodId: jtlMethod.shippingMethodId },
           update: {
@@ -110,6 +116,7 @@ export class ShippingMethodService {
             jtlCarrierName: jtlMethod.carrierName,
             trackingUrlSchema: jtlMethod.trackingUrlSchema,
             cutoffTime: jtlMethod.cutoffTime,
+            isActive: true, // Ensure synced methods are active
             updatedAt: new Date(),
           },
           create: {
@@ -129,11 +136,33 @@ export class ShippingMethodService {
         syncedCount++;
       }
 
+      // Deactivate shipping methods that belong to this fulfillerId but are no longer in JTL
+      let deactivatedCount = 0;
+      if (fulfillerId && validJtlMethodIds.length > 0) {
+        const deactivateResult = await this.prisma.shippingMethod.updateMany({
+          where: {
+            jtlFulfillerId: fulfillerId,
+            isActive: true,
+            jtlShippingMethodId: {
+              notIn: validJtlMethodIds,
+            },
+          },
+          data: {
+            isActive: false,
+            updatedAt: new Date(),
+          },
+        });
+        deactivatedCount = deactivateResult.count;
+        if (deactivatedCount > 0) {
+          console.log(`[ShippingMethodService] Deactivated ${deactivatedCount} shipping methods no longer in JTL FFN`);
+        }
+      }
+
       console.log(`[ShippingMethodService] Synced ${syncedCount} shipping methods from JTL FFN`);
-      return { success: true, synced: syncedCount };
+      return { success: true, synced: syncedCount, deactivated: deactivatedCount };
     } catch (error: any) {
       console.error('[ShippingMethodService] Failed to sync shipping methods:', error);
-      return { success: false, synced: 0, error: error.message };
+      return { success: false, synced: 0, deactivated: 0, error: error.message };
     }
   }
 
