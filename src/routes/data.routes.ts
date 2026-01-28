@@ -1509,6 +1509,114 @@ router.get('/inbounds/:id', async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * POST /api/data/inbounds
+ * Create a new inbound delivery
+ */
+router.post('/inbounds', async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).userId;
+    const {
+      deliveryType,
+      expectedDate,
+      carrierName,
+      trackingNumber,
+      notes,
+      simulateStock,
+      items, // Array of { productId, quantity }
+    } = req.body;
+
+    // Validate required fields
+    if (!items || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'At least one product is required',
+      });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      include: { client: true },
+    });
+
+    if (!user || !user.client) {
+      return res.status(404).json({
+        success: false,
+        error: 'User or client not found',
+      });
+    }
+
+    const clientId = user.client.id;
+
+    // Generate inbound ID
+    const count = await prisma.inboundDelivery.count({
+      where: { clientId },
+    });
+    const inboundId = `INB-${String(count + 1).padStart(5, '0')}`;
+
+    // Calculate total announced quantity
+    const totalQuantity = items.reduce((sum: number, item: { quantity: number }) => sum + item.quantity, 0);
+
+    // Map delivery type to valid enum value
+    const validDeliveryTypes = ['FREIGHT_FORWARDER', 'PARCEL_SERVICE', 'SELF_DELIVERY', 'OTHER'];
+    const mappedDeliveryType = validDeliveryTypes.includes(deliveryType?.toUpperCase())
+      ? deliveryType.toUpperCase()
+      : 'PARCEL_SERVICE';
+
+    // Create the inbound delivery with items
+    const inbound = await prisma.inboundDelivery.create({
+      data: {
+        inboundId,
+        clientId,
+        deliveryType: mappedDeliveryType as any,
+        expectedDate: expectedDate ? new Date(expectedDate) : null,
+        carrierName: carrierName || null,
+        trackingNumber: trackingNumber || null,
+        notes: notes || null,
+        simulateStock: simulateStock || false,
+        announcedQuantity: totalQuantity,
+        numberOfProducts: items.length,
+        status: 'PENDING',
+        items: {
+          create: items.map((item: { productId: string; quantity: number }) => ({
+            productId: item.productId,
+            announcedQuantity: item.quantity,
+          })),
+        },
+      },
+      include: {
+        client: {
+          select: {
+            companyName: true,
+            name: true,
+          },
+        },
+        items: {
+          include: {
+            product: {
+              select: {
+                name: true,
+                sku: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    res.status(201).json({
+      success: true,
+      data: inbound,
+    });
+  } catch (error) {
+    console.error('Error creating inbound:', error);
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Failed to create inbound',
+    });
+  }
+});
+
 // ============= EDIT ROUTES WITH JTL FFN SYNC =============
 
 /**
