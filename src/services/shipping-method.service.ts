@@ -380,6 +380,20 @@ export class ShippingMethodService {
   }
 
   /**
+   * Get active shipping methods filtered by JTL Fulfiller ID
+   * This returns only the shipping methods that belong to a specific JTL FFN account
+   */
+  async getActiveShippingMethodsByFulfillerId(fulfillerId: string) {
+    return this.prisma.shippingMethod.findMany({
+      where: { 
+        isActive: true,
+        jtlFulfillerId: fulfillerId,
+      },
+      orderBy: [{ isDefault: 'desc' }, { name: 'asc' }],
+    });
+  }
+
+  /**
    * Get shipping method mappings for a client
    */
   async getClientMappings(clientId: string) {

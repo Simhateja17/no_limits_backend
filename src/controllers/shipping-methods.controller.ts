@@ -18,11 +18,31 @@ const encryptionService = getEncryptionService();
 
 /**
  * Get all shipping methods
+ * For CLIENT users: Returns only shipping methods linked to their JTL FFN account (filtered by fulfillerId)
+ * For ADMIN/EMPLOYEE users: Returns all shipping methods
  */
 export async function getShippingMethods(req: Request, res: Response) {
   try {
     const { activeOnly } = req.query;
+    const user = (req as any).user;
     
+    // For CLIENT users, filter by their JTL FFN fulfillerId
+    if (user && user.role === 'CLIENT' && user.clientId) {
+      const jtlConfig = await prisma.jtlConfig.findFirst({
+        where: { clientId_fk: user.clientId },
+        select: { fulfillerId: true },
+      });
+      
+      if (jtlConfig?.fulfillerId) {
+        const shippingMethods = await shippingMethodService.getActiveShippingMethodsByFulfillerId(jtlConfig.fulfillerId);
+        return res.json({
+          success: true,
+          data: shippingMethods,
+        });
+      }
+    }
+    
+    // For ADMIN/EMPLOYEE or clients without JTL config, return all (or all active)
     const shippingMethods = activeOnly === 'true'
       ? await shippingMethodService.getActiveShippingMethods()
       : await shippingMethodService.getAllShippingMethods();
@@ -686,9 +706,9 @@ export async function syncMyShippingMethods(req: Request, res: Response) {
       });
     }
 
-    // Return the synced methods
-    const shippingMethods = await shippingMethodService.getActiveShippingMethods();
-    console.log('[ShippingMethodsController] Active shipping methods after sync:', shippingMethods.length);
+    // Return only the synced methods filtered by fulfillerId (not ALL active shipping methods)
+    const shippingMethods = await shippingMethodService.getActiveShippingMethodsByFulfillerId(jtlConfig.fulfillerId);
+    console.log('[ShippingMethodsController] Shipping methods for fulfillerId', jtlConfig.fulfillerId, ':', shippingMethods.length);
 
     res.json({
       success: true,

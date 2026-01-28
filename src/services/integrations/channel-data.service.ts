@@ -184,6 +184,8 @@ export class ChannelDataService {
         return [];
       }
 
+      console.log(`[ChannelDataService] Fetching WooCommerce shipping methods for channel ${channel.id} (${channel.url})`);
+
       const wooService = new WooCommerceService({
         url: channel.url,
         consumerKey: encryptionService.decrypt(channel.apiClientId),
@@ -191,6 +193,9 @@ export class ChannelDataService {
       });
 
       const methods = await wooService.getShippingMethods();
+      console.log(`[ChannelDataService] WooCommerce returned ${methods.length} shipping methods for channel ${channel.id}`);
+      console.log(`[ChannelDataService] WooCommerce methods:`, methods.map(m => ({ id: m.id, name: m.name, methodId: m.methodId })));
+
       return methods.map(m => ({
         id: m.id,
         name: m.name,

@@ -836,7 +836,10 @@ export class WooCommerceService {
     name: string;
     order: number;
   }>> {
-    return this.request<Array<{ id: number; name: string; order: number }>>('/shipping/zones');
+    console.log('[WooCommerce] API Call: GET /shipping/zones');
+    const zones = await this.request<Array<{ id: number; name: string; order: number }>>('/shipping/zones');
+    console.log(`[WooCommerce] API Response: Received ${zones.length} zones`);
+    return zones;
   }
 
   /**
@@ -857,7 +860,10 @@ export class WooCommerceService {
       [key: string]: { value: string } | undefined;
     };
   }>> {
-    return this.request<Array<any>>(`/shipping/zones/${zoneId}/methods`);
+    console.log(`[WooCommerce] API Call: GET /shipping/zones/${zoneId}/methods`);
+    const methods = await this.request<Array<any>>(`/shipping/zones/${zoneId}/methods`);
+    console.log(`[WooCommerce] API Response: Received ${methods.length} methods for zone ${zoneId}`);
+    return methods;
   }
 
   /**
@@ -873,7 +879,12 @@ export class WooCommerceService {
     enabled: boolean;
   }>> {
     try {
+      console.log('[WooCommerce] Starting to fetch shipping methods...');
+      console.log(`[WooCommerce] Store URL: ${this.credentials.url}`);
+
       const zones = await this.getShippingZones();
+      console.log(`[WooCommerce] Retrieved ${zones.length} shipping zones:`, zones.map(z => ({ id: z.id, name: z.name })));
+
       const methods: Array<{
         id: string;
         name: string;
@@ -885,11 +896,30 @@ export class WooCommerceService {
 
       for (const zone of zones) {
         try {
+          console.log(`[WooCommerce] Fetching methods for zone "${zone.name}" (ID: ${zone.id})...`);
           const zoneMethods = await this.getShippingZoneMethods(zone.id);
+          console.log(`[WooCommerce] Zone "${zone.name}" has ${zoneMethods.length} methods:`,
+            zoneMethods.map(m => ({
+              method_id: m.method_id,
+              instance_id: m.instance_id,
+              title: m.title,
+              method_title: m.method_title,
+              enabled: m.enabled,
+              settings_title: m.settings?.title?.value
+            }))
+          );
 
           for (const method of zoneMethods) {
             // Use the custom title from settings if available, otherwise use method_title
             const displayName = method.settings?.title?.value || method.title || method.method_title;
+
+            console.log(`[WooCommerce] Processing method in zone "${zone.name}":`, {
+              instance_id: method.instance_id,
+              method_id: method.method_id,
+              display_name: displayName,
+              enabled: method.enabled,
+              title_source: method.settings?.title?.value ? 'settings.title.value' : (method.title ? 'title' : 'method_title')
+            });
 
             methods.push({
               id: `${method.method_id}_${method.instance_id}`,
@@ -901,25 +931,50 @@ export class WooCommerceService {
             });
           }
         } catch (err) {
-          console.warn(`[WooCommerce] Could not fetch methods for zone ${zone.id}:`, err);
+          console.warn(`[WooCommerce] Could not fetch methods for zone ${zone.id} (${zone.name}):`, err);
         }
       }
+
+      console.log(`[WooCommerce] Total methods collected (before deduplication): ${methods.length}`);
+      console.log('[WooCommerce] All methods:', methods.map(m => ({ name: m.name, enabled: m.enabled, zone: m.zoneName })));
 
       // Deduplicate by name (same shipping method can appear in multiple zones)
       // Keep only enabled methods, but include all if none are enabled
       const enabledMethods = methods.filter(m => m.enabled);
+      console.log(`[WooCommerce] Enabled methods: ${enabledMethods.length}, Total methods: ${methods.length}`);
+
       const methodsToUse = enabledMethods.length > 0 ? enabledMethods : methods;
+      console.log(`[WooCommerce] Using ${methodsToUse.length} methods for deduplication (${enabledMethods.length > 0 ? 'enabled only' : 'all methods'})`);
 
       const uniqueMethods = new Map<string, typeof methods[0]>();
       for (const method of methodsToUse) {
         if (!uniqueMethods.has(method.name)) {
+          console.log(`[WooCommerce] Adding unique method: "${method.name}" (${method.methodId}) from zone "${method.zoneName}"`);
           uniqueMethods.set(method.name, method);
+        } else {
+          console.log(`[WooCommerce] Skipping duplicate method: "${method.name}" from zone "${method.zoneName}"`);
         }
       }
 
-      return Array.from(uniqueMethods.values());
+      const finalMethods = Array.from(uniqueMethods.values());
+      console.log(`[WooCommerce] Final unique shipping methods: ${finalMethods.length}`);
+      console.log('[WooCommerce] Final methods list:', finalMethods.map(m => ({
+        id: m.id,
+        name: m.name,
+        methodId: m.methodId,
+        enabled: m.enabled,
+        zone: m.zoneName
+      })));
+
+      return finalMethods;
     } catch (error) {
       console.error('[WooCommerce] Error fetching shipping methods:', error);
+      if (error instanceof Error) {
+        console.error('[WooCommerce] Error details:', {
+          message: error.message,
+          stack: error.stack
+        });
+      }
       return [];
     }
   }
