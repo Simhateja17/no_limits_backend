@@ -159,6 +159,20 @@ export class ChannelDataService {
   }): Promise<Array<{ id: string; name: string; carrier?: string }>> {
     const encryptionService = getEncryptionService();
 
+    // Helper to safely decrypt credentials (handles both encrypted and plain text)
+    const safeDecrypt = (text: string, channelId: string): string => {
+      try {
+        if (encryptionService.isEncrypted(text)) {
+          return encryptionService.decrypt(text);
+        }
+        console.warn(`[ChannelDataService] Credential not encrypted, using plain text for channel ${channelId}`);
+        return text; // Return plain text if not encrypted
+      } catch (err) {
+        console.warn(`[ChannelDataService] Failed to decrypt credential for channel ${channelId}, using plain text:`, err);
+        return text; // Fallback to plain text on error
+      }
+    };
+
     if (channel.type === 'SHOPIFY') {
       if (!channel.shopDomain || !channel.accessToken) {
         console.warn('[ChannelDataService] Shopify channel missing credentials');
@@ -167,7 +181,7 @@ export class ChannelDataService {
 
       const shopifyService = createShopifyServiceAuto({
         shopDomain: channel.shopDomain,
-        accessToken: encryptionService.decrypt(channel.accessToken),
+        accessToken: safeDecrypt(channel.accessToken, channel.id),
       });
 
       const methods = await shopifyService.getShippingMethods();
@@ -188,8 +202,8 @@ export class ChannelDataService {
 
       const wooService = new WooCommerceService({
         url: channel.url,
-        consumerKey: encryptionService.decrypt(channel.apiClientId),
-        consumerSecret: encryptionService.decrypt(channel.apiClientSecret),
+        consumerKey: safeDecrypt(channel.apiClientId, channel.id),
+        consumerSecret: safeDecrypt(channel.apiClientSecret, channel.id),
       });
 
       const methods = await wooService.getShippingMethods();
