@@ -1056,7 +1056,7 @@ export class ProductSyncService {
       const updateResult = await jtlService.updateProduct(product.jtlProductId, {
         name: product.name,
         description: product.description || undefined,
-        weight: product.weightInKg ? Number(product.weightInKg) : undefined,
+        netWeight: product.weightInKg ? Number(product.weightInKg) : undefined,
         height: product.heightInCm ? Number(product.heightInCm) / 100 : undefined,
         length: product.lengthInCm ? Number(product.lengthInCm) / 100 : undefined,
         width: product.widthInCm ? Number(product.widthInCm) / 100 : undefined,
