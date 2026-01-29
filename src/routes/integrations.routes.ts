@@ -2668,6 +2668,35 @@ router.post('/product-sync/client/:clientId/pull-from-jtl', authenticate, async 
 });
 
 /**
+ * Import products FROM JTL FFN that don't exist in local database
+ * Creates products locally WITHOUT syncing to sales channels
+ * Use for warehouse-only products or to populate dashboard inventory
+ */
+router.post('/product-sync/client/:clientId/import-from-jtl', authenticate, async (req: Request, res: Response) => {
+  try {
+    const { clientId } = req.params;
+
+    if (!productSyncService) {
+      productSyncService = new ProductSyncService(prisma);
+    }
+
+    const result = await productSyncService.importProductsFromJTL(clientId);
+
+    res.json({
+      success: result.errors.length === 0,
+      message: `Imported ${result.imported} products from JTL (${result.alreadyExists} already existed, ${result.failed} failed)`,
+      data: result,
+    });
+  } catch (error) {
+    console.error('Error importing products from JTL:', error);
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+});
+
+/**
  * Get sync queue processor metrics
  */
 router.get('/product-sync/metrics', authenticate, (req: Request, res: Response) => {

@@ -85,9 +85,9 @@ export class StockSyncService {
 
     const credentials: JTLCredentials = {
       clientId: jtlConfig.clientId,
-      clientSecret: encryptionService.decrypt(jtlConfig.clientSecret),
-      accessToken: jtlConfig.accessToken ? encryptionService.decrypt(jtlConfig.accessToken) : undefined,
-      refreshToken: jtlConfig.refreshToken ? encryptionService.decrypt(jtlConfig.refreshToken) : undefined,
+      clientSecret: encryptionService.safeDecrypt(jtlConfig.clientSecret),
+      accessToken: jtlConfig.accessToken ? encryptionService.safeDecrypt(jtlConfig.accessToken) : undefined,
+      refreshToken: jtlConfig.refreshToken ? encryptionService.safeDecrypt(jtlConfig.refreshToken) : undefined,
       tokenExpiresAt: jtlConfig.tokenExpiresAt ?? undefined,
       environment: jtlConfig.environment as 'sandbox' | 'production',
       fulfillerId: jtlConfig.fulfillerId,

@@ -274,7 +274,7 @@ export class ClientOnboardingService {
 
       // Decrypt credentials for JTL service
       const encryptionService = getEncryptionService();
-      const decryptedClientSecret = encryptionService.decrypt(jtlConfig.clientSecret);
+      const decryptedClientSecret = encryptionService.safeDecrypt(jtlConfig.clientSecret);
 
       const jtlService = new JTLService({
         clientId: jtlConfig.clientId,
@@ -1105,7 +1105,7 @@ export class ClientOnboardingService {
         }
         clientId = channel.apiClientId;
         const encryptionService = getEncryptionService();
-        clientSecret = encryptionService.decrypt(channel.apiClientSecret);
+        clientSecret = encryptionService.safeDecrypt(channel.apiClientSecret);
       } else {
         return {
           success: false,

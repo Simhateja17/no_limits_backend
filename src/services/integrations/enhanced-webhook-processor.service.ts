@@ -78,6 +78,8 @@ interface ShopifyOrderPayload {
   name: string;
   email?: string;
   phone?: string;
+  created_at?: string;
+  updated_at?: string;
   total_price: string;
   subtotal_price?: string;
   total_tax?: string;
@@ -223,6 +225,8 @@ interface WooCommerceOrderPayload {
   id: number;
   number: string;
   status: string;
+  date_created?: string;
+  date_modified?: string;
   currency: string;
   total: string;
   subtotal?: string;
@@ -621,7 +625,7 @@ export class EnhancedWebhookProcessor {
         externalOrderId: externalId,
         orderNumber: payload.name,
         channelId,
-        orderDate: new Date(),
+        orderDate: payload.created_at ? new Date(payload.created_at) : new Date(),
         status: this.mapShopifyOrderStatus(payload.fulfillment_status, payload.financial_status),
 
         // Customer information
@@ -1375,7 +1379,7 @@ export class EnhancedWebhookProcessor {
         externalOrderId: externalId,
         orderNumber: payload.number,
         channelId,
-        orderDate: new Date(),
+        orderDate: payload.date_created ? new Date(payload.date_created) : new Date(),
         status: this.mapWooCommerceOrderStatus(payload.status),
 
         // Customer information

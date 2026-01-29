@@ -115,13 +115,13 @@ export class SyncOrchestrator {
     const decryptedCredentials = {
       ...config.jtlCredentials,
       clientSecret: config.jtlCredentials.clientSecret
-        ? encryptionService.decrypt(config.jtlCredentials.clientSecret)
+        ? encryptionService.safeDecrypt(config.jtlCredentials.clientSecret)
         : config.jtlCredentials.clientSecret,
       accessToken: config.jtlCredentials.accessToken
-        ? encryptionService.decrypt(config.jtlCredentials.accessToken)
+        ? encryptionService.safeDecrypt(config.jtlCredentials.accessToken)
         : config.jtlCredentials.accessToken,
       refreshToken: config.jtlCredentials.refreshToken
-        ? encryptionService.decrypt(config.jtlCredentials.refreshToken)
+        ? encryptionService.safeDecrypt(config.jtlCredentials.refreshToken)
         : config.jtlCredentials.refreshToken,
     };
     this.jtlService = new JTLService(decryptedCredentials);
@@ -1209,7 +1209,7 @@ export class SyncOrchestrator {
 
         const shopifyService = createShopifyServiceAuto({
           shopDomain: order.channel.shopDomain,
-          accessToken: encryptionService.decrypt(order.channel.accessToken),
+          accessToken: encryptionService.safeDecrypt(order.channel.accessToken),
         });
 
         // Map status to Shopify fulfillment status
@@ -1260,8 +1260,8 @@ export class SyncOrchestrator {
 
         const wooService = new WooCommerceService({
           url: order.channel.apiUrl,
-          consumerKey: encryptionService.decrypt(order.channel.apiClientId),
-          consumerSecret: encryptionService.decrypt(order.channel.apiClientSecret),
+          consumerKey: encryptionService.safeDecrypt(order.channel.apiClientId),
+          consumerSecret: encryptionService.safeDecrypt(order.channel.apiClientSecret),
         });
 
         // Map status to WooCommerce order status

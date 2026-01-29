@@ -1082,6 +1082,22 @@ router.get('/orders/:id', async (req: Request, res: Response) => {
           },
         },
         channel: true,
+        syncLogs: {
+          orderBy: {
+            createdAt: 'asc',
+          },
+          select: {
+            id: true,
+            action: true,
+            origin: true,
+            targetPlatform: true,
+            changedFields: true,
+            previousState: true,
+            newState: true,
+            success: true,
+            createdAt: true,
+          },
+        },
       },
     });
 

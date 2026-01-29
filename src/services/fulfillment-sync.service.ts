@@ -79,10 +79,10 @@ export class FulfillmentSyncService {
 
       return new JTLService({
         clientId: jtlConfig.clientId,
-        clientSecret: encryptionService.decrypt(jtlConfig.clientSecret),
+        clientSecret: encryptionService.safeDecrypt(jtlConfig.clientSecret),
         environment: (jtlConfig.environment || 'sandbox') as 'sandbox' | 'production',
-        accessToken: encryptionService.decrypt(jtlConfig.accessToken),
-        refreshToken: jtlConfig.refreshToken ? encryptionService.decrypt(jtlConfig.refreshToken) : undefined,
+        accessToken: encryptionService.safeDecrypt(jtlConfig.accessToken),
+        refreshToken: jtlConfig.refreshToken ? encryptionService.safeDecrypt(jtlConfig.refreshToken) : undefined,
         tokenExpiresAt: jtlConfig.tokenExpiresAt || undefined,
       });
     } catch (error) {

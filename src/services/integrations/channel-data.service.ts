@@ -224,7 +224,8 @@ export class ChannelDataService {
 
   /**
    * Get existing shipping method mappings for a channel
-   * Returns mappings in the format: warehouseMethodId -> channelMethodName
+   * Returns mappings in the format: channelMethodName -> warehouseMethodId
+   * This format supports multiple channel methods mapping to the same warehouse method
    */
   async getShippingMappingsForChannel(channelId: string): Promise<{
     success: boolean;
@@ -241,9 +242,10 @@ export class ChannelDataService {
         }
       });
 
-      // Convert to format: { warehouseMethodId: channelMethodName }
+      // Convert to format: { channelMethodName: warehouseMethodId }
+      // This allows multiple channel methods to map to the same warehouse method
       const result = mappings.reduce((acc, m) => {
-        acc[m.shippingMethodId] = m.channelShippingTitle;
+        acc[m.channelShippingTitle] = m.shippingMethodId;
         return acc;
       }, {} as Record<string, string>);
 
@@ -264,10 +266,12 @@ export class ChannelDataService {
   /**
    * Save shipping method mappings for a channel
    * Maps channel shipping methods to JTL FFN shipping methods
+   * Input format: channelMethodName -> warehouseMethodId
+   * This format supports multiple channel methods mapping to the same warehouse method
    */
   async saveShippingMappings(
     channelId: string,
-    mappings: Record<string, string> // warehouseMethodId -> channelMethodName
+    mappings: Record<string, string> // channelMethodName -> warehouseMethodId
   ): Promise<{ success: boolean; saved: number; error?: string }> {
     try {
       // Get channel details
@@ -286,11 +290,11 @@ export class ChannelDataService {
 
       let savedCount = 0;
 
-      // Process each mapping
-      for (const [warehouseMethodId, channelMethodName] of Object.entries(mappings)) {
-        if (!channelMethodName) continue;
+      // Process each mapping: channelMethodName -> warehouseMethodId
+      for (const [channelMethodName, warehouseMethodId] of Object.entries(mappings)) {
+        if (!warehouseMethodId) continue;
 
-        // Find the warehouse shipping method to get the JTL ID
+        // Find the warehouse shipping method to validate it exists
         const warehouseMethod = await this.prisma.shippingMethod.findUnique({
           where: { id: warehouseMethodId },
         });

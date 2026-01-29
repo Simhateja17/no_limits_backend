@@ -219,7 +219,7 @@ export class BiDirectionalSyncService {
     const encryptionService = getEncryptionService();
     const shopifyService = createShopifyServiceAuto({
       shopDomain: channel.shopDomain,
-      accessToken: encryptionService.decrypt(channel.accessToken),
+      accessToken: encryptionService.safeDecrypt(channel.accessToken),
     });
 
     try {
@@ -328,8 +328,8 @@ export class BiDirectionalSyncService {
     const encryptionService = getEncryptionService();
     const wooService = new WooCommerceService({
       url: channel.apiUrl,
-      consumerKey: encryptionService.decrypt(channel.apiClientId),
-      consumerSecret: encryptionService.decrypt(channel.apiClientSecret),
+      consumerKey: encryptionService.safeDecrypt(channel.apiClientId),
+      consumerSecret: encryptionService.safeDecrypt(channel.apiClientSecret),
     });
 
     try {
@@ -471,7 +471,7 @@ export class BiDirectionalSyncService {
     const encryptionService = getEncryptionService();
     const shopifyService = createShopifyServiceAuto({
       shopDomain: channel.shopDomain,
-      accessToken: encryptionService.decrypt(channel.accessToken),
+      accessToken: encryptionService.safeDecrypt(channel.accessToken),
     });
 
     try {
@@ -512,8 +512,8 @@ export class BiDirectionalSyncService {
     const encryptionService = getEncryptionService();
     const wooService = new WooCommerceService({
       url: channel.apiUrl,
-      consumerKey: encryptionService.decrypt(channel.apiClientId),
-      consumerSecret: encryptionService.decrypt(channel.apiClientSecret),
+      consumerKey: encryptionService.safeDecrypt(channel.apiClientId),
+      consumerSecret: encryptionService.safeDecrypt(channel.apiClientSecret),
     });
 
     try {
@@ -669,7 +669,7 @@ export class BiDirectionalSyncService {
     const encryptionService = getEncryptionService();
     const shopifyService = createShopifyServiceAuto({
       shopDomain: channel.shopDomain,
-      accessToken: encryptionService.decrypt(channel.accessToken),
+      accessToken: encryptionService.safeDecrypt(channel.accessToken),
     });
 
     try {
@@ -803,8 +803,8 @@ export class BiDirectionalSyncService {
     const encryptionService = getEncryptionService();
     const wooService = new WooCommerceService({
       url: channel.apiUrl,
-      consumerKey: encryptionService.decrypt(channel.apiClientId),
-      consumerSecret: encryptionService.decrypt(channel.apiClientSecret),
+      consumerKey: encryptionService.safeDecrypt(channel.apiClientId),
+      consumerSecret: encryptionService.safeDecrypt(channel.apiClientSecret),
     });
 
     try {
@@ -969,7 +969,7 @@ export class BiDirectionalSyncService {
     const encryptionService = getEncryptionService();
     const shopifyService = createShopifyServiceAuto({
       shopDomain: channel.shopDomain,
-      accessToken: encryptionService.decrypt(channel.accessToken),
+      accessToken: encryptionService.safeDecrypt(channel.accessToken),
     });
 
     try {
@@ -1019,8 +1019,8 @@ export class BiDirectionalSyncService {
     const encryptionService = getEncryptionService();
     const wooService = new WooCommerceService({
       url: channel.apiUrl,
-      consumerKey: encryptionService.decrypt(channel.apiClientId),
-      consumerSecret: encryptionService.decrypt(channel.apiClientSecret),
+      consumerKey: encryptionService.safeDecrypt(channel.apiClientId),
+      consumerSecret: encryptionService.safeDecrypt(channel.apiClientSecret),
     });
 
     try {
@@ -1122,7 +1122,7 @@ export class BiDirectionalSyncService {
     const encryptionService = getEncryptionService();
     const shopifyService = createShopifyServiceAuto({
       shopDomain: channel.shopDomain,
-      accessToken: encryptionService.decrypt(channel.accessToken),
+      accessToken: encryptionService.safeDecrypt(channel.accessToken),
     });
 
     try {
@@ -1177,8 +1177,8 @@ export class BiDirectionalSyncService {
     const encryptionService = getEncryptionService();
     const wooService = new WooCommerceService({
       url: channel.apiUrl,
-      consumerKey: encryptionService.decrypt(channel.apiClientId),
-      consumerSecret: encryptionService.decrypt(channel.apiClientSecret),
+      consumerKey: encryptionService.safeDecrypt(channel.apiClientId),
+      consumerSecret: encryptionService.safeDecrypt(channel.apiClientSecret),
     });
 
     try {
@@ -1285,7 +1285,7 @@ export class BiDirectionalSyncService {
     const encryptionService = getEncryptionService();
     const shopifyService = createShopifyServiceAuto({
       shopDomain: channel.shopDomain,
-      accessToken: encryptionService.decrypt(channel.accessToken),
+      accessToken: encryptionService.safeDecrypt(channel.accessToken),
     });
 
     try {
@@ -1337,8 +1337,8 @@ export class BiDirectionalSyncService {
     const encryptionService = getEncryptionService();
     const wooService = new WooCommerceService({
       url: channel.apiUrl,
-      consumerKey: encryptionService.decrypt(channel.apiClientId),
-      consumerSecret: encryptionService.decrypt(channel.apiClientSecret),
+      consumerKey: encryptionService.safeDecrypt(channel.apiClientId),
+      consumerSecret: encryptionService.safeDecrypt(channel.apiClientSecret),
     });
 
     try {

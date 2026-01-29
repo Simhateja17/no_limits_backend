@@ -61,12 +61,12 @@ export class JTLOrderSyncService {
 
         return new JTLService({
             clientId: jtlConfig.clientId,
-            clientSecret: encryptionService.decrypt(jtlConfig.clientSecret),
+            clientSecret: encryptionService.safeDecrypt(jtlConfig.clientSecret),
             fulfillerId: jtlConfig.fulfillerId,
             warehouseId: jtlConfig.warehouseId,
             environment: jtlConfig.environment as 'sandbox' | 'production',
-            accessToken: jtlConfig.accessToken ? encryptionService.decrypt(jtlConfig.accessToken) : undefined,
-            refreshToken: jtlConfig.refreshToken ? encryptionService.decrypt(jtlConfig.refreshToken) : undefined,
+            accessToken: jtlConfig.accessToken ? encryptionService.safeDecrypt(jtlConfig.accessToken) : undefined,
+            refreshToken: jtlConfig.refreshToken ? encryptionService.safeDecrypt(jtlConfig.refreshToken) : undefined,
             tokenExpiresAt: jtlConfig.tokenExpiresAt || undefined,
         }, this.prisma, clientId);
     }

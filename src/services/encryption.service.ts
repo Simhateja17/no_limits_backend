@@ -98,6 +98,33 @@ export class EncryptionService {
     const parts = text.split(':');
     return parts.length === 3 && parts[0].length === 32 && parts[1].length === 32;
   }
+
+  /**
+   * Safely decrypt a string - handles both encrypted and unencrypted values
+   * Use this when you're not sure if a value is encrypted (e.g., legacy data)
+   * @param text - The text to decrypt (may or may not be encrypted)
+   * @returns The decrypted text if encrypted, or the original text if not
+   */
+  safeDecrypt(text: string): string {
+    if (!text) {
+      return text;
+    }
+
+    // Check if the text looks encrypted (format: iv:authTag:encrypted)
+    if (this.isEncrypted(text)) {
+      try {
+        return this.decrypt(text);
+      } catch (error) {
+        // If decryption fails, it might be a false positive
+        // (e.g., a value that happens to have colons)
+        console.warn('[Encryption] Failed to decrypt value that looked encrypted, returning original');
+        return text;
+      }
+    }
+
+    // Not encrypted - return as-is
+    return text;
+  }
 }
 
 // Export a singleton instance

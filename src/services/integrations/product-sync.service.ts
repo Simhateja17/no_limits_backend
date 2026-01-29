@@ -699,7 +699,7 @@ export class ProductSyncService {
     const { ShopifyService } = await import('./shopify.service.js');
     const shopifyService = new ShopifyService({
       shopDomain,
-      accessToken: encryptionService.decrypt(accessToken),
+      accessToken: encryptionService.safeDecrypt(accessToken),
     });
 
     // Get the product to find inventory item ID
@@ -741,8 +741,8 @@ export class ProductSyncService {
 
     const wooService = new WooCommerceService({
       url: apiUrl,
-      consumerKey: encryptionService.decrypt(apiClientId),
-      consumerSecret: encryptionService.decrypt(apiClientSecret),
+      consumerKey: encryptionService.safeDecrypt(apiClientId),
+      consumerSecret: encryptionService.safeDecrypt(apiClientSecret),
     });
 
     const productId = parseInt(externalProductId);
@@ -788,7 +788,7 @@ export class ProductSyncService {
     const encryptionService = getEncryptionService();
     const shopifyService = createShopifyServiceAuto({
       shopDomain: productChannel.channel.shopDomain,
-      accessToken: encryptionService.decrypt(productChannel.channel.accessToken),
+      accessToken: encryptionService.safeDecrypt(productChannel.channel.accessToken),
     });
 
     const price = product.netSalesPrice ? Number(product.netSalesPrice) : 0;
@@ -904,8 +904,8 @@ export class ProductSyncService {
     const encryptionService = getEncryptionService();
     const wooService = new WooCommerceService({
       url: productChannel.channel.apiUrl,
-      consumerKey: encryptionService.decrypt(productChannel.channel.apiClientId),
-      consumerSecret: encryptionService.decrypt(productChannel.channel.apiClientSecret),
+      consumerKey: encryptionService.safeDecrypt(productChannel.channel.apiClientId),
+      consumerSecret: encryptionService.safeDecrypt(productChannel.channel.apiClientSecret),
     });
 
     const price = product.netSalesPrice ? Number(product.netSalesPrice) : 0;
@@ -1025,9 +1025,9 @@ export class ProductSyncService {
     const encryptionService = getEncryptionService();
     const jtlService = new JTLService({
       clientId: jtlConfig.clientId,
-      clientSecret: encryptionService.decrypt(jtlConfig.clientSecret),
-      accessToken: encryptionService.decrypt(jtlConfig.accessToken),
-      refreshToken: jtlConfig.refreshToken ? encryptionService.decrypt(jtlConfig.refreshToken) : undefined,
+      clientSecret: encryptionService.safeDecrypt(jtlConfig.clientSecret),
+      accessToken: encryptionService.safeDecrypt(jtlConfig.accessToken),
+      refreshToken: jtlConfig.refreshToken ? encryptionService.safeDecrypt(jtlConfig.refreshToken) : undefined,
       tokenExpiresAt: jtlConfig.tokenExpiresAt || undefined,
       fulfillerId: jtlConfig.fulfillerId,
       warehouseId: jtlConfig.warehouseId,
@@ -1092,9 +1092,36 @@ export class ProductSyncService {
       attributes: attributes,
     };
 
-    const result = await jtlService.createProduct(jtlProduct);
-    console.log(`[ProductSync] Successfully created JTL product ${result.jfsku} for SKU: ${product.sku}`);
-    return result.jfsku;
+    try {
+      const result = await jtlService.createProduct(jtlProduct);
+      console.log(`[ProductSync] Successfully created JTL product ${result.jfsku} for SKU: ${product.sku}`);
+      return result.jfsku;
+    } catch (error) {
+      // Auto-fix duplicate product errors by extracting JFSKU from error response
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      if (errorMessage.includes('Products_DuplicateProduct') || errorMessage.includes('DuplicateProduct')) {
+        // Parse: {"errorMetaData":{"MerchantSku":"05.190.00..0001","Jfsku":"6EN701UK6QH"}}
+        const jfskuMatch = errorMessage.match(/"Jfsku":"([A-Z0-9]+)"/i);
+        if (jfskuMatch) {
+          const jfsku = jfskuMatch[1];
+          console.log(`[ProductSync] Auto-fixed duplicate: ${product.sku} → ${jfsku}`);
+
+          // Update local product with extracted JFSKU
+          await this.prisma.product.update({
+            where: { id: product.id },
+            data: {
+              jtlProductId: jfsku,
+              jtlSyncStatus: 'SYNCED',
+              lastJtlSync: new Date(),
+            },
+          });
+
+          return jfsku;
+        }
+      }
+      // Re-throw if not a duplicate error or couldn't extract JFSKU
+      throw error;
+    }
   }
 
   // ============= JOB QUEUE MANAGEMENT =============
@@ -1708,9 +1735,9 @@ export class ProductSyncService {
       const encryptionService = getEncryptionService();
       const jtlService = new JTLService({
         clientId: jtlConfig.clientId,
-        clientSecret: encryptionService.decrypt(jtlConfig.clientSecret),
-        accessToken: encryptionService.decrypt(jtlConfig.accessToken),
-        refreshToken: jtlConfig.refreshToken ? encryptionService.decrypt(jtlConfig.refreshToken) : undefined,
+        clientSecret: encryptionService.safeDecrypt(jtlConfig.clientSecret),
+        accessToken: encryptionService.safeDecrypt(jtlConfig.accessToken),
+        refreshToken: jtlConfig.refreshToken ? encryptionService.safeDecrypt(jtlConfig.refreshToken) : undefined,
         tokenExpiresAt: jtlConfig.tokenExpiresAt || undefined,
         fulfillerId: jtlConfig.fulfillerId,
         warehouseId: jtlConfig.warehouseId,
@@ -1774,6 +1801,129 @@ export class ProductSyncService {
       return result;
     } catch (error) {
       console.error(`[ProductSync] Error pulling products from JTL:`, error);
+      result.errors.push(error instanceof Error ? error.message : 'Unknown error');
+      return result;
+    }
+  }
+
+  /**
+   * Import products FROM JTL FFN that don't exist in local database
+   * Creates new products locally WITHOUT syncing to sales channels
+   * Use this for warehouse-only products or to populate dashboard inventory
+   */
+  async importProductsFromJTL(clientId: string): Promise<{
+    totalJtlProducts: number;
+    alreadyExists: number;
+    imported: number;
+    failed: number;
+    errors: string[];
+    importedProducts: Array<{ sku: string; name: string; jfsku: string }>;
+  }> {
+    console.log(`[ProductSync] Importing products from JTL for client ${clientId}`);
+
+    const result = {
+      totalJtlProducts: 0,
+      alreadyExists: 0,
+      imported: 0,
+      failed: 0,
+      errors: [] as string[],
+      importedProducts: [] as Array<{ sku: string; name: string; jfsku: string }>,
+    };
+
+    try {
+      // Get JTL config for this client
+      const jtlConfig = await this.prisma.jtlConfig.findUnique({
+        where: { clientId_fk: clientId },
+      });
+
+      if (!jtlConfig || !jtlConfig.isActive || !jtlConfig.accessToken) {
+        result.errors.push('No active JTL configuration found');
+        return result;
+      }
+
+      // Create JTL service
+      const encryptionService = getEncryptionService();
+      const jtlService = new JTLService({
+        clientId: jtlConfig.clientId,
+        clientSecret: encryptionService.safeDecrypt(jtlConfig.clientSecret),
+        accessToken: encryptionService.safeDecrypt(jtlConfig.accessToken),
+        refreshToken: jtlConfig.refreshToken ? encryptionService.safeDecrypt(jtlConfig.refreshToken) : undefined,
+        tokenExpiresAt: jtlConfig.tokenExpiresAt || undefined,
+        fulfillerId: jtlConfig.fulfillerId,
+        warehouseId: jtlConfig.warehouseId,
+        environment: jtlConfig.environment as 'sandbox' | 'production',
+      }, this.prisma, clientId);
+
+      // Fetch ALL products from JTL FFN (with stock info)
+      console.log(`[ProductSync] Fetching all products from JTL FFN...`);
+      const jtlProducts = await jtlService.getAllProductsWithStock();
+      result.totalJtlProducts = jtlProducts.length;
+      console.log(`[ProductSync] Found ${jtlProducts.length} products in JTL FFN`);
+
+      // Get all existing local products for this client (by SKU)
+      const localProducts = await this.prisma.product.findMany({
+        where: { clientId },
+        select: { sku: true },
+      });
+      const existingSkus = new Set(localProducts.map(p => p.sku));
+
+      // Import products that don't exist locally
+      for (const jtlProduct of jtlProducts) {
+        const sku = jtlProduct.merchantSku;
+
+        if (existingSkus.has(sku)) {
+          result.alreadyExists++;
+          continue;
+        }
+
+        try {
+          // Create new product in local DB (NO channel sync)
+          const newProduct = await this.prisma.product.create({
+            data: {
+              clientId,
+              productId: `JTL-${jtlProduct.jfsku}`,
+              sku: sku,
+              name: jtlProduct.name || `Product ${sku}`,
+              description: jtlProduct.description || null,
+              gtin: jtlProduct.identifier?.ean || null,
+              han: jtlProduct.identifier?.han || null,
+              weightInKg: jtlProduct.netWeight || null,
+              heightInCm: jtlProduct.height ? jtlProduct.height * 100 : null, // m to cm
+              lengthInCm: jtlProduct.length ? jtlProduct.length * 100 : null,
+              widthInCm: jtlProduct.width ? jtlProduct.width * 100 : null,
+              available: jtlProduct.stock?.stockLevel || 0,
+              reserved: jtlProduct.stock?.stockLevelReserved || 0,
+              announced: jtlProduct.stock?.stockLevelAnnounced || 0,
+              jtlProductId: jtlProduct.jfsku,
+              jtlSyncStatus: 'SYNCED',
+              lastJtlSync: new Date(),
+              lastUpdatedBy: 'JTL',
+              syncStatus: 'SYNCED',
+              isActive: true,
+              // NO channels - this is warehouse-only
+            },
+          });
+
+          result.imported++;
+          result.importedProducts.push({
+            sku: sku,
+            name: jtlProduct.name || `Product ${sku}`,
+            jfsku: jtlProduct.jfsku,
+          });
+
+          console.log(`[ProductSync] Imported product: ${sku} (${jtlProduct.jfsku})`);
+        } catch (error) {
+          result.failed++;
+          const errorMsg = `Failed to import ${sku}: ${error instanceof Error ? error.message : 'Unknown error'}`;
+          result.errors.push(errorMsg);
+          console.error(`[ProductSync] ${errorMsg}`);
+        }
+      }
+
+      console.log(`[ProductSync] Import complete: ${result.imported} imported, ${result.alreadyExists} already exist, ${result.failed} failed`);
+      return result;
+    } catch (error) {
+      console.error(`[ProductSync] Error importing products from JTL:`, error);
       result.errors.push(error instanceof Error ? error.message : 'Unknown error');
       return result;
     }

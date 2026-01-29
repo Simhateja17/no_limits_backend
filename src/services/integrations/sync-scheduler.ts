@@ -401,9 +401,9 @@ export class SyncScheduler {
 
         const jtlService = new JTLService({
           clientId: config.clientId,
-          clientSecret: encryptionService.decrypt(config.clientSecret),
-          accessToken: config.accessToken ? encryptionService.decrypt(config.accessToken) : undefined,
-          refreshToken: encryptionService.decrypt(config.refreshToken),
+          clientSecret: encryptionService.safeDecrypt(config.clientSecret),
+          accessToken: config.accessToken ? encryptionService.safeDecrypt(config.accessToken) : undefined,
+          refreshToken: encryptionService.safeDecrypt(config.refreshToken),
           tokenExpiresAt: config.tokenExpiresAt ?? undefined,
           environment: config.environment as 'sandbox' | 'production',
           fulfillerId: config.fulfillerId,
@@ -720,7 +720,7 @@ export class SyncScheduler {
         channelType: 'SHOPIFY',
         shopifyCredentials: {
           shopDomain: channel.shopDomain,
-          accessToken: encryptionService.decrypt(channel.accessToken),
+          accessToken: encryptionService.safeDecrypt(channel.accessToken),
         },
         jtlCredentials: {
           clientId: jtlConfig.clientId,
@@ -743,8 +743,8 @@ export class SyncScheduler {
         channelType: 'WOOCOMMERCE',
         wooCommerceCredentials: {
           url: channel.apiUrl,
-          consumerKey: channel.apiClientId,
-          consumerSecret: encryptionService.decrypt(channel.apiClientSecret),
+          consumerKey: encryptionService.safeDecrypt(channel.apiClientId),
+          consumerSecret: encryptionService.safeDecrypt(channel.apiClientSecret),
         },
         jtlCredentials: {
           clientId: jtlConfig.clientId,

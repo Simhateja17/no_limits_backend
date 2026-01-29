@@ -523,9 +523,9 @@ export class SyncQueueProcessor {
       const encryptionService = getEncryptionService();
       const jtlService = new JTLService({
         clientId: jtlConfig.clientId,
-        clientSecret: encryptionService.decrypt(jtlConfig.clientSecret),
-        accessToken: jtlConfig.accessToken ? encryptionService.decrypt(jtlConfig.accessToken) : undefined,
-        refreshToken: jtlConfig.refreshToken ? encryptionService.decrypt(jtlConfig.refreshToken) : undefined,
+        clientSecret: encryptionService.safeDecrypt(jtlConfig.clientSecret),
+        accessToken: jtlConfig.accessToken ? encryptionService.safeDecrypt(jtlConfig.accessToken) : undefined,
+        refreshToken: jtlConfig.refreshToken ? encryptionService.safeDecrypt(jtlConfig.refreshToken) : undefined,
         tokenExpiresAt: jtlConfig.tokenExpiresAt || undefined,
         fulfillerId: jtlConfig.fulfillerId,
         warehouseId: jtlConfig.warehouseId,
@@ -939,9 +939,9 @@ export class JTLPollingService {
     try {
       const jtlService = new JTLService({
         clientId: config.clientId,
-        clientSecret: encryptionService.decrypt(config.clientSecret),
-        accessToken: encryptionService.decrypt(config.accessToken),
-        refreshToken: config.refreshToken ? encryptionService.decrypt(config.refreshToken) : undefined,
+        clientSecret: encryptionService.safeDecrypt(config.clientSecret),
+        accessToken: encryptionService.safeDecrypt(config.accessToken),
+        refreshToken: config.refreshToken ? encryptionService.safeDecrypt(config.refreshToken) : undefined,
         tokenExpiresAt: config.tokenExpiresAt || undefined,
         fulfillerId: config.fulfillerId,
         warehouseId: config.warehouseId,
