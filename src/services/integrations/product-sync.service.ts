@@ -1884,13 +1884,6 @@ export class ProductSyncService {
               productId: `JTL-${jtlProduct.jfsku}`,
               sku: sku,
               name: jtlProduct.name || `Product ${sku}`,
-              description: jtlProduct.description || null,
-              gtin: jtlProduct.identifier?.ean || null,
-              han: jtlProduct.identifier?.han || null,
-              weightInKg: jtlProduct.netWeight || null,
-              heightInCm: jtlProduct.height ? jtlProduct.height * 100 : null, // m to cm
-              lengthInCm: jtlProduct.length ? jtlProduct.length * 100 : null,
-              widthInCm: jtlProduct.width ? jtlProduct.width * 100 : null,
               available: jtlProduct.stock?.stockLevel || 0,
               reserved: jtlProduct.stock?.stockLevelReserved || 0,
               announced: jtlProduct.stock?.stockLevelAnnounced || 0,
