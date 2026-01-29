@@ -17,6 +17,7 @@ import integrationsRoutes, {
   stopEnhancedSyncProcessors,
 } from './integrations.routes.js';
 import createSyncAdminRoutes from './sync-admin.routes.js';
+import createSyncPipelineRoutes from './sync-pipeline.routes.js';
 import taskMessagesRoutes from './task-messages.routes.js';
 import { prisma } from '../config/index.js';
 
@@ -60,6 +61,10 @@ router.use('/integrations', integrationsRoutes);
 // Sync Admin routes (Queue management, Conflicts, Returns, Order Operations)
 const syncAdminRoutes = createSyncAdminRoutes(prisma);
 router.use('/sync-admin', syncAdminRoutes);
+
+// Sync Pipeline routes (Initial sync pipeline for client onboarding)
+const syncPipelineRoutes = createSyncPipelineRoutes(prisma);
+router.use('/sync-pipeline', syncPipelineRoutes);
 
 // Export integration lifecycle functions
 export {

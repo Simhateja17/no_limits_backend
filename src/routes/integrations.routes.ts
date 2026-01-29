@@ -1897,6 +1897,54 @@ router.get('/channels', authenticate, async (req: Request, res: Response) => {
 });
 
 /**
+ * Get a single channel by ID
+ */
+router.get('/channels/:channelId', authenticate, async (req: Request, res: Response) => {
+  try {
+    const { channelId } = req.params;
+
+    if (!channelId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required parameter: channelId',
+      });
+    }
+
+    const channel = await prisma.channel.findUnique({
+      where: { id: channelId },
+      select: {
+        id: true,
+        name: true,
+        type: true,
+        status: true,
+        clientId: true,
+        isActive: true,
+        url: true,
+        shopDomain: true,
+      },
+    });
+
+    if (!channel) {
+      return res.status(404).json({
+        success: false,
+        error: 'Channel not found',
+      });
+    }
+
+    res.json({
+      success: true,
+      channel,
+    });
+  } catch (error) {
+    console.error('Error fetching channel:', error);
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+});
+
+/**
  * Get warehouse locations for authenticated client
  */
 router.get('/warehouse-locations', authenticate, async (req: Request, res: Response) => {

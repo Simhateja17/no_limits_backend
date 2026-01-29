@@ -17,34 +17,48 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
 
-// Decryption service for channel secrets
+// Decryption service for channel secrets (matches backend EncryptionService)
 function decrypt(encryptedText) {
-  const algorithm = 'aes-256-gcm';
-  const encryptionKey = process.env.ENCRYPTION_KEY || 'your-32-character-secret-key!!';
-  const key = Buffer.from(encryptionKey.padEnd(32, '0').slice(0, 32));
-
-  const parts = encryptedText.split(':');
-  if (parts.length !== 3) {
-    // Assume it's not encrypted
+  if (!encryptedText) {
     return encryptedText;
   }
 
-  const iv = Buffer.from(parts[0], 'hex');
-  const authTag = Buffer.from(parts[1], 'hex');
-  const encrypted = parts[2];
+  const algorithm = 'aes-256-gcm';
+  const encryptionKey = process.env.ENCRYPTION_KEY;
 
-  const decipher = crypto.createDecipheriv(algorithm, key, iv);
-  decipher.setAuthTag(authTag);
+  if (!encryptionKey || encryptionKey.length !== 64) {
+    console.warn('⚠️  ENCRYPTION_KEY not set or invalid, returning original value');
+    return encryptedText;
+  }
 
-  let decrypted = decipher.update(encrypted, 'hex', 'utf8');
-  decrypted += decipher.final('utf8');
+  const key = Buffer.from(encryptionKey, 'hex');
 
-  return decrypted;
+  const parts = encryptedText.split(':');
+  if (parts.length !== 3 || parts[0].length !== 32 || parts[1].length !== 32) {
+    // Not encrypted - return as-is
+    return encryptedText;
+  }
+
+  try {
+    const [ivHex, authTagHex, encrypted] = parts;
+    const iv = Buffer.from(ivHex, 'hex');
+    const authTag = Buffer.from(authTagHex, 'hex');
+
+    const decipher = crypto.createDecipheriv(algorithm, key, iv);
+    decipher.setAuthTag(authTag);
+
+    let decrypted = decipher.update(encrypted, 'hex', 'utf8');
+    decrypted += decipher.final('utf8');
+
+    return decrypted;
+  } catch (error) {
+    console.warn(`⚠️  Decryption failed, returning original: ${error.message}`);
+    return encryptedText;
+  }
 }
 
-// Simple HTTP client for Shopify
+// Simple HTTP client for Shopify (using native fetch)
 async function fetchShopifyOrder(shop, accessToken, orderId) {
-  const fetch = (await import('node-fetch')).default;
   const url = `https://${shop}/admin/api/2024-01/orders/${orderId}.json`;
 
   const response = await fetch(url, {
@@ -63,9 +77,8 @@ async function fetchShopifyOrder(shop, accessToken, orderId) {
   return data.order;
 }
 
-// Simple HTTP client for WooCommerce
+// Simple HTTP client for WooCommerce (using native fetch)
 async function fetchWooCommerceOrder(url, consumerKey, consumerSecret, orderId) {
-  const fetch = (await import('node-fetch')).default;
   const baseUrl = url.replace(/\/$/, '');
   const apiUrl = `${baseUrl}/wp-json/wc/v3/orders/${orderId}`;
 
@@ -105,11 +118,11 @@ async function fixOrderDates() {
           select: {
             id: true,
             type: true,
-            shopifyShop: true,
-            shopifyAccessToken: true,
-            wooCommerceUrl: true,
-            wooCommerceConsumerKey: true,
-            wooCommerceConsumerSecret: true,
+            shopDomain: true,      // Shopify shop domain
+            accessToken: true,     // Access token (encrypted)
+            apiUrl: true,          // WooCommerce API URL
+            apiClientId: true,     // WooCommerce consumer key
+            apiClientSecret: true, // WooCommerce consumer secret
           },
         },
       },
@@ -155,9 +168,9 @@ async function fixOrderDates() {
         try {
           let originalOrderDate;
 
-          if (channel.type === 'SHOPIFY' && channel.shopifyShop && channel.shopifyAccessToken) {
+          if (channel.type === 'SHOPIFY' && channel.shopDomain && channel.accessToken) {
             // Decrypt token if needed
-            const accessToken = decrypt(channel.shopifyAccessToken);
+            const accessToken = decrypt(channel.accessToken);
 
             // Parse external order ID (might be a string like "gid://shopify/Order/123" or just "123")
             let shopifyOrderId = order.externalOrderId;
@@ -166,7 +179,7 @@ async function fixOrderDates() {
             }
 
             const shopifyOrder = await fetchShopifyOrder(
-              channel.shopifyShop,
+              channel.shopDomain,
               accessToken,
               shopifyOrderId
             );
@@ -174,13 +187,13 @@ async function fixOrderDates() {
             if (shopifyOrder && shopifyOrder.created_at) {
               originalOrderDate = new Date(shopifyOrder.created_at);
             }
-          } else if (channel.type === 'WOOCOMMERCE' && channel.wooCommerceUrl) {
+          } else if (channel.type === 'WOOCOMMERCE' && channel.apiUrl) {
             // Decrypt credentials if needed
-            const consumerKey = decrypt(channel.wooCommerceConsumerKey);
-            const consumerSecret = decrypt(channel.wooCommerceConsumerSecret);
+            const consumerKey = decrypt(channel.apiClientId);
+            const consumerSecret = decrypt(channel.apiClientSecret);
 
             const wooOrder = await fetchWooCommerceOrder(
-              channel.wooCommerceUrl,
+              channel.apiUrl,
               consumerKey,
               consumerSecret,
               order.externalOrderId

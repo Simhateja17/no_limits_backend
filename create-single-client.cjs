@@ -13,10 +13,10 @@ async function createSingleClient() {
   try {
     console.log('🌱 Creating a new client account...\n');
 
-    const email = 'r.kutke@gmx.de';
+    const email = 'nolimitstest@example.com';
     const password = 'password123';
-    const name = 'Client User';
-    const companyName = 'Client Account';
+    const name = 'nolimitstest';
+    const companyName = 'No Limits Test';
 
     // Check if user already exists
     const existingUser = await prisma.user.findUnique({

@@ -17,6 +17,7 @@ import { createShopifyServiceAuto } from './shopify-service-factory.js';
 import { WooCommerceService } from './woocommerce.service.js';
 import { JTLService } from './jtl.service.js';
 import { SyncOrchestrator } from './sync-orchestrator.js';
+import { InitialSyncPipelineService } from './initial-sync-pipeline.service.js';
 import { getEncryptionService } from '../encryption.service.js';
 import { ShippingMethodService } from '../shipping-method.service.js';
 import type { ShopifyCredentials, WooCommerceCredentials, JTLCredentials } from './types.js';
@@ -656,10 +657,11 @@ export class ClientOnboardingService {
   /**
    * Start background sync with user-selected date
    * This is triggered after JTL OAuth completion with the user's chosen sync start date
+   * Now uses the InitialSyncPipelineService for comprehensive, trackable sync
    */
   async startBackgroundSync(channelId: string, syncFromDate: Date): Promise<OnboardingResult> {
     try {
-      console.log(`[Background Sync] Starting sync for channel ${channelId} from ${syncFromDate.toISOString()}`);
+      console.log(`[Background Sync] Starting pipeline sync for channel ${channelId} from ${syncFromDate.toISOString()}`);
 
       // Validate channel exists
       const channel = await this.prisma.channel.findUnique({
@@ -694,45 +696,31 @@ export class ClientOnboardingService {
         };
       }
 
-      // Create sync job to track progress
-      const syncJob = await this.prisma.syncJob.create({
-        data: {
-          channelId,
-          status: 'IN_PROGRESS',
-          type: 'INITIAL_FULL',
-          currentPhase: 'background_sync',
-          startedAt: new Date(),
-        },
+      // Use the new InitialSyncPipelineService for comprehensive sync
+      const pipelineService = new InitialSyncPipelineService(this.prisma);
+      const pipelineResult = await pipelineService.startPipeline({
+        channelId,
+        clientId: channel.clientId,
+        syncFromDate,
+        syncType: 'initial',
       });
 
-      console.log(`[Background Sync] Created sync job ${syncJob.id}`);
+      if (!pipelineResult.success) {
+        return {
+          success: false,
+          error: pipelineResult.error || 'Failed to start sync pipeline',
+        };
+      }
 
-      // Build sync config
-      const syncConfig = await this.buildSyncConfig(channelId);
-
-      // Start background sync (non-blocking)
-      const backgroundSyncPromise = this.runBackgroundSyncWithDate(
-        channelId,
-        syncConfig,
-        syncFromDate,
-        syncJob.id
-      )
-        .catch(err => {
-          console.error('[Background Sync] Failed:', err);
-        })
-        .finally(() => {
-          ClientOnboardingService.activeBackgroundSyncs.delete(backgroundSyncPromise);
-        });
-
-      // Track the promise to keep it alive
-      ClientOnboardingService.activeBackgroundSyncs.add(backgroundSyncPromise);
+      console.log(`[Background Sync] Pipeline started: ${pipelineResult.pipelineId}`);
 
       return {
         success: true,
         channelId,
-        syncJobId: syncJob.id,
+        syncJobId: pipelineResult.pipelineId,
         details: {
-          message: 'Background sync started successfully',
+          message: 'Sync pipeline started successfully',
+          pipelineId: pipelineResult.pipelineId,
           syncFromDate: syncFromDate.toISOString(),
         },
       };

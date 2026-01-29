@@ -398,6 +398,7 @@ model Channel {
   products        ProductChannel[]
   syncJobs        SyncJob[]
   shippingMethodMappings ShippingMethodMapping[] @relation("ChannelShippingMappings")
+  syncPipelines   SyncPipeline[]
 
   @@map("channels")
 }
@@ -1511,6 +1512,24 @@ enum NotificationPriority {
   CRITICAL
 }
 
+// Pipeline status (for initial sync)
+enum PipelineStatus {
+  PENDING
+  IN_PROGRESS
+  PAUSED
+  COMPLETED
+  FAILED
+}
+
+// Pipeline step status
+enum PipelineStepStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  FAILED
+  SKIPPED
+}
+
 // Notifications - System and user notifications
 model Notification {
   id                String              @id @default(cuid())
@@ -1552,4 +1571,57 @@ model Notification {
   @@index([type])
   @@index([createdAt])
   @@map("notifications")
+}
+
+// Sync Pipeline - Tracks multi-step sync operations during client onboarding
+model SyncPipeline {
+  id              String          @id @default(cuid())
+  channelId       String          @map("channel_id")
+  channel         Channel         @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  clientId        String          @map("client_id")
+  status          PipelineStatus  @default(PENDING)
+  currentStep     Int             @default(0)
+  totalSteps      Int             @default(5)
+  syncFromDate    DateTime?
+  syncType        String          @default("initial") // "initial", "full", "incremental"
+  progress        Float           @default(0)
+  progressMessage String?
+  lastError       String?
+  retryCount      Int             @default(0)
+  maxRetries      Int             @default(3)
+  startedAt       DateTime?
+  completedAt     DateTime?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  steps           PipelineStep[]
+
+  @@unique([channelId, syncType])
+  @@index([status])
+  @@index([clientId])
+  @@map("sync_pipelines")
+}
+
+// Pipeline Step - Individual steps within a sync pipeline
+model PipelineStep {
+  id              String              @id @default(cuid())
+  pipelineId      String              @map("pipeline_id")
+  pipeline        SyncPipeline        @relation(fields: [pipelineId], references: [id], onDelete: Cascade)
+  stepNumber      Int
+  stepName        String
+  stepDescription String?
+  status          PipelineStepStatus  @default(PENDING)
+  progress        Float               @default(0)
+  itemsTotal      Int                 @default(0)
+  itemsProcessed  Int                 @default(0)
+  itemsFailed     Int                 @default(0)
+  inputData       Json?
+  outputData      Json?
+  errorMessage    String?
+  startedAt       DateTime?
+  completedAt     DateTime?
+  createdAt       DateTime            @default(now())
+
+  @@unique([pipelineId, stepNumber])
+  @@index([status])
+  @@map("pipeline_steps")
 }
