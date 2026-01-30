@@ -1713,15 +1713,6 @@ export class JTLService {
     error?: string;
     alreadyExisted?: boolean;
   }> {
-    console.log(`[JTL-FFN-SYNC] ========== START: Manual sync for order ${orderId} ==========`);
-    console.log(`[JTL-FFN-SYNC] Credentials check:`, {
-      hasFulfillerId: !!this.credentials.fulfillerId,
-      hasWarehouseId: !!this.credentials.warehouseId,
-      fulfillerId: this.credentials.fulfillerId,
-      warehouseId: this.credentials.warehouseId,
-      environment: this.credentials.environment,
-    });
-
     try {
       const order = await prisma.order.findUnique({
         where: { id: orderId },
@@ -1732,40 +1723,27 @@ export class JTLService {
       });
 
       if (!order) {
-        console.log(`[JTL-FFN-SYNC] ERROR: Order ${orderId} not found`);
         return { success: false, error: `Order ${orderId} not found` };
       }
 
-      console.log(`[JTL-FFN-SYNC] Order found:`, {
-        id: order.id,
-        orderId: order.orderId,
-        orderNumber: order.orderNumber,
-        clientId: order.clientId,
-        itemCount: order.items.length,
-        isCancelled: order.isCancelled,
-        jtlOutboundId: order.jtlOutboundId,
-      });
-
       // Don't sync cancelled orders
       if (order.isCancelled) {
-        console.log(`[JTL-FFN-SYNC] SKIPPED: Order ${orderId} is cancelled`);
+        console.log(`[JTL] Skipping cancelled order ${orderId}`);
         return { success: true };
       }
 
       // Check if already synced locally
       if (order.jtlOutboundId) {
-        console.log(`[JTL-FFN-SYNC] ALREADY SYNCED LOCALLY: Order ${orderId} has outbound ${order.jtlOutboundId}`);
+        console.log(`[JTL] Order ${orderId} already synced as outbound ${order.jtlOutboundId}`);
         return { success: true, outboundId: order.jtlOutboundId };
       }
 
       // Check if order already exists in FFN (by querying FFN directly)
-      console.log(`[JTL-FFN-SYNC] Checking FFN for existing outbound with merchantOutboundNumber: ${order.orderId}`);
+      console.log(`[JTL-FFN-SYNC] Checking if order ${orderId} exists in FFN...`);
       const existingOutbound = await this.getOutboundByMerchantNumber(order.orderId);
-      console.log(`[JTL-FFN-SYNC] FFN query result:`, existingOutbound ? { outboundId: existingOutbound.outboundId, status: existingOutbound.status } : 'Not found in FFN');
-
       if (existingOutbound) {
         // Order exists in FFN but not in our DB - sync the ID back
-        console.log(`[JTL-FFN-SYNC] Order already exists in FFN as outbound ${existingOutbound.outboundId} - syncing ID back to local DB`);
+        console.log(`[JTL-FFN-SYNC] Order already exists in FFN as outbound ${existingOutbound.outboundId} - syncing ID back`);
         await prisma.order.update({
           where: { id: orderId },
           data: {
@@ -1796,29 +1774,21 @@ export class JTLService {
       }
       console.log(`[JTL-FFN-SYNC] Order not in FFN, creating new outbound...`);
 
+      // Validate required credentials before creating outbound
+      if (!this.credentials.warehouseId) {
+        return {
+          success: false,
+          error: 'JTL warehouseId not configured. Please set up the warehouse ID in JTL integration settings.',
+        };
+      }
+
       // Transform order to JTL outbound format
       const outbound = this.transformOrderToOutbound(order);
-      console.log(`[JTL-FFN-SYNC] Outbound payload:`, {
-        merchantOutboundNumber: outbound.merchantOutboundNumber,
-        warehouseId: outbound.warehouseId,
-        fulfillerId: outbound.fulfillerId,
-        customerOrderNumber: outbound.customerOrderNumber,
-        itemCount: outbound.items?.length,
-        shippingCountry: (outbound.shippingAddress as any)?.country,
-        shippingType: outbound.shippingType,
-        shippingMethodId: outbound.shippingMethodId,
-      });
 
       // Create outbound in JTL-FFN
-      console.log(`[JTL-FFN-SYNC] Sending createOutbound request to JTL FFN API...`);
       const result = await this.createOutbound(outbound);
-      console.log(`[JTL-FFN-SYNC] Outbound created successfully:`, {
-        outboundId: result.outboundId,
-        status: result.status,
-      });
 
       // Update order with JTL IDs
-      console.log(`[JTL-FFN-SYNC] Updating local database with outbound ID...`);
       await prisma.order.update({
         where: { id: orderId },
         data: {
@@ -1842,12 +1812,10 @@ export class JTLService {
         },
       });
 
-      console.log(`[JTL-FFN-SYNC] ========== SUCCESS: Order ${orderId} synced as outbound ${result.outboundId} ==========`);
+      console.log(`[JTL] Order ${orderId} synced to FFN as outbound ${result.outboundId}`);
       return { success: true, outboundId: result.outboundId };
     } catch (error: any) {
-      console.error(`[JTL-FFN-SYNC] ========== FAILED: Order ${orderId} sync error ==========`);
-      console.error(`[JTL-FFN-SYNC] Error:`, error.message);
-      console.error(`[JTL-FFN-SYNC] Stack:`, error.stack);
+      console.error(`[JTL] Failed to sync order ${orderId}:`, error);
       return { success: false, error: error.message };
     }
   }
