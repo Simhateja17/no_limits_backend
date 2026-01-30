@@ -631,8 +631,20 @@ export class JTLService {
    * Get product by merchant SKU
    */
   async getProductByMerchantSku(merchantSku: string): Promise<JTLProductResponse | null> {
-    const products = await this.getProducts({ merchantSku, limit: 1 });
-    return products.length > 0 ? products[0] : null;
+    // Note: JTL API doesn't properly filter by merchantSku in query params,
+    // so we fetch all products and filter client-side
+    const products = await this.getProducts({ merchantSku, limit: 100 });
+
+    // Filter client-side since JTL API returns all products regardless of merchantSku filter
+    const matchingProduct = products.find(p => p.merchantSku === merchantSku);
+
+    if (matchingProduct) {
+      console.log(`[JTL] Found matching product for merchantSku ${merchantSku}: jfsku=${matchingProduct.jfsku}`);
+    } else {
+      console.log(`[JTL] No product found with merchantSku ${merchantSku} (checked ${products.length} products)`);
+    }
+
+    return matchingProduct || null;
   }
 
   /**

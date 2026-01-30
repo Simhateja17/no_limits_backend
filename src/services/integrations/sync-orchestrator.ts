@@ -681,6 +681,9 @@ export class SyncOrchestrator {
   /**
    * Upsert order in local database
    */
+  // Track order upsert stats
+  private orderUpsertStats = { created: 0, updated: 0 };
+
   private async upsertOrderInDB(orderData: OrderSyncData): Promise<OrderSyncData & { status: OrderStatus }> {
     const channel = await this.prisma.channel.findUnique({
       where: { id: this.config.channelId },
@@ -707,8 +710,10 @@ export class SyncOrchestrator {
         },
       });
 
-      return { 
-        ...orderData, 
+      this.orderUpsertStats.updated++;
+
+      return {
+        ...orderData,
         localOrderId: updatedOrder.id,
         status: updatedOrder.status,
       };
@@ -752,8 +757,10 @@ export class SyncOrchestrator {
         },
       });
 
-      return { 
-        ...orderData, 
+      this.orderUpsertStats.created++;
+
+      return {
+        ...orderData,
         localOrderId: newOrder.id,
         status: newOrder.status,
       };
@@ -1074,7 +1081,7 @@ export class SyncOrchestrator {
 
         for (const outbound of outbounds) {
           allOutbounds.push({
-            id: outbound.id,
+            id: outbound.outboundId,
             merchantOutboundNumber: outbound.merchantOutboundNumber,
             status: outbound.status,
           });
@@ -1650,8 +1657,26 @@ export class SyncOrchestrator {
 
     // PHASE 2: Pull and store orders (NO JTL push)
     try {
+      // Reset order upsert stats
+      this.orderUpsertStats = { created: 0, updated: 0 };
+
+      // Check existing orders count before sync
+      const existingOrderCount = await this.prisma.order.count({
+        where: { channelId: this.config.channelId },
+      });
+      console.log(`[SyncOrchestrator] Existing orders in DB for this channel: ${existingOrderCount}`);
+
       const channelOrders = await this.pullOrdersFromChannel(since);
       console.log(`[SyncOrchestrator] Pulled ${channelOrders.length} orders from channel`);
+
+      // Check for duplicate external order IDs
+      const externalIds = channelOrders.map(o => o.externalOrderId);
+      const uniqueIds = new Set(externalIds);
+      if (uniqueIds.size !== externalIds.length) {
+        console.log(`[SyncOrchestrator] WARNING: Found ${externalIds.length - uniqueIds.size} duplicate external order IDs!`);
+      } else {
+        console.log(`[SyncOrchestrator] All ${uniqueIds.size} external order IDs are unique`);
+      }
 
       for (const order of channelOrders) {
         try {
@@ -1662,6 +1687,14 @@ export class SyncOrchestrator {
           results.orders.itemsFailed++;
         }
       }
+
+      console.log(`[SyncOrchestrator] Order upsert stats: ${this.orderUpsertStats.created} created, ${this.orderUpsertStats.updated} updated`);
+
+      // Final count after sync
+      const finalOrderCount = await this.prisma.order.count({
+        where: { channelId: this.config.channelId },
+      });
+      console.log(`[SyncOrchestrator] Final orders in DB for this channel: ${finalOrderCount}`);
     } catch (error) {
       console.error('[SyncOrchestrator] Failed to pull orders:', error);
     }

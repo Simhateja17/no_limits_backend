@@ -625,7 +625,7 @@ export class InitialSyncPipelineService {
 
     console.log(`[SyncPipeline] Step 2 Results:`);
     console.log(`[SyncPipeline]   📥 Imported: ${result.imported} products from JTL`);
-    console.log(`[SyncPipeline]   ⏭️  Skipped: ${result.skipped} (already exist locally)`);
+    console.log(`[SyncPipeline]   ⏭️  Already exist: ${result.alreadyExists} (skipped)`);
     console.log(`[SyncPipeline]   ❌ Failed: ${result.failed}`);
     if (result.errors.length > 0) {
       console.log(`[SyncPipeline]   Errors: ${result.errors.slice(0, 3).join('; ')}${result.errors.length > 3 ? '...' : ''}`);
@@ -816,7 +816,6 @@ export class InitialSyncPipelineService {
 
     console.log(`[SyncPipeline] Step 5 Results:`);
     console.log(`[SyncPipeline]   📦 Products updated: ${result.productsUpdated}`);
-    console.log(`[SyncPipeline]   ⏭️  Skipped: ${result.productsSkipped || 0}`);
     console.log(`[SyncPipeline]   ❌ Failed: ${result.productsFailed}`);
     if (result.errors.length > 0) {
       console.log(`[SyncPipeline]   Errors: ${result.errors.slice(0, 3).join('; ')}${result.errors.length > 3 ? '...' : ''}`);
