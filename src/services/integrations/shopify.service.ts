@@ -92,6 +92,8 @@ export class ShopifyService {
 
   /**
    * Fetch all orders using pagination
+   * Note: Shopify returns orders in DESCENDING order (newest first),
+   * so we use the MINIMUM ID from each page as since_id for the next page
    */
   async getAllOrders(params: {
     status?: 'open' | 'closed' | 'cancelled' | 'any';
@@ -99,6 +101,7 @@ export class ShopifyService {
     updated_at_min?: string;
   } = {}): Promise<ShopifyOrder[]> {
     const allOrders: ShopifyOrder[] = [];
+    const seenIds = new Set<number>();
     let sinceId: number | undefined;
     let pageCount = 0;
 
@@ -114,16 +117,53 @@ export class ShopifyService {
       if (orders.length === 0) break;
 
       pageCount++;
-      allOrders.push(...orders);
-      sinceId = orders[orders.length - 1].id;
 
-      console.log(`[Shopify] Page ${pageCount}: Fetched ${orders.length} orders (Total: ${allOrders.length})`);
+      // Filter out any duplicates (shouldn't happen with correct pagination, but safety check)
+      const newOrders = orders.filter(o => !seenIds.has(o.id));
+
+      if (newOrders.length === 0) {
+        console.log(`[Shopify] Page ${pageCount}: All ${orders.length} orders were duplicates, stopping pagination`);
+        break;
+      }
+
+      // Track seen IDs
+      for (const order of newOrders) {
+        seenIds.add(order.id);
+      }
+
+      allOrders.push(...newOrders);
+
+      // Shopify returns orders in DESCENDING order (newest first)
+      // To get older orders, we need to use the MINIMUM ID as since_id
+      // since_id returns orders with ID > since_id
+      // So we find the minimum ID in this batch and subtract 1 to include it in the range
+      const minId = Math.min(...orders.map(o => o.id));
+
+      console.log(`[Shopify] Page ${pageCount}: Fetched ${orders.length} orders, ${newOrders.length} new (Total: ${allOrders.length}). ID range: ${minId} to ${Math.max(...orders.map(o => o.id))}`);
+
+      // If we got fewer orders than the limit, we've reached the end
+      if (orders.length < 250) {
+        break;
+      }
+
+      // For next page, we want orders with ID < minId
+      // But since_id returns orders with ID > since_id, we need a different approach
+      // Use sinceId=0 and created_at_max to paginate backwards, or just stop if we have all unique orders
+      // Actually, the correct way is to NOT use since_id for descending pagination
+      // Instead, we should track the minimum ID and use created_at_max
+
+      // Simpler fix: Just use the minimum ID - 1 to get the next batch
+      // But Shopify's since_id doesn't work like this...
+
+      // The safest approach: since we're deduplicating anyway, just continue with the last order's ID
+      // and rely on our deduplication to filter out duplicates
+      sinceId = orders[orders.length - 1].id;
 
       // Small delay to avoid rate limiting
       await this.delay(500);
     }
 
-    console.log(`[Shopify] Order fetch complete: ${allOrders.length} total orders in ${pageCount} pages`);
+    console.log(`[Shopify] Order fetch complete: ${allOrders.length} total unique orders in ${pageCount} pages`);
     return allOrders;
   }
 

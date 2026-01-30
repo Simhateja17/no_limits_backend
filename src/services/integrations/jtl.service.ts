@@ -447,39 +447,100 @@ export class JTLService {
   async getOutboundByMerchantNumber(merchantOutboundNumber: string): Promise<JTLOutboundResponse | null> {
     const outbounds = await this.getOutbounds({
       merchantOutboundNumber,
-      limit: 1,
+      top: 1,
     });
     return outbounds.length > 0 ? outbounds[0] : null;
   }
 
   /**
    * List outbounds with filters
+   * JTL FFN uses OData-style parameters: $top, $skip, $filter, $orderBy
    */
   async getOutbounds(params: {
     merchantOutboundNumber?: string;
     status?: string;
     warehouseId?: string;
-    limit?: number;
-    offset?: number;
-    createdAfter?: string;
-    createdBefore?: string;
+    top?: number;
+    skip?: number;
+    filter?: string;
+    orderBy?: string;
   } = {}): Promise<JTLOutboundResponse[]> {
     const queryParams = new URLSearchParams();
-    
-    Object.entries(params).forEach(([key, value]) => {
-      if (value !== undefined) {
-        queryParams.set(key, String(value));
-      }
-    });
+
+    // Map to OData-style parameters
+    if (params.top !== undefined) queryParams.set('$top', String(params.top));
+    if (params.skip !== undefined) queryParams.set('$skip', String(params.skip));
+    if (params.orderBy) queryParams.set('$orderBy', params.orderBy);
+
+    // Build OData filter if specific fields provided
+    const filters: string[] = [];
+    if (params.merchantOutboundNumber) {
+      filters.push(`merchantOutboundNumber eq '${params.merchantOutboundNumber}'`);
+    }
+    if (params.status) {
+      filters.push(`status eq '${params.status}'`);
+    }
+    if (params.warehouseId) {
+      filters.push(`warehouseId eq '${params.warehouseId}'`);
+    }
+    if (params.filter) {
+      filters.push(params.filter);
+    }
+    if (filters.length > 0) {
+      queryParams.set('$filter', filters.join(' and '));
+    }
 
     const query = queryParams.toString();
     const endpoint = `/v1/merchant/outbounds${query ? `?${query}` : ''}`;
 
-    const response = await this.request<{ items?: JTLOutboundResponse[]; outbounds?: JTLOutboundResponse[]; count?: number }>(endpoint);
+    const response = await this.request<{ items?: JTLOutboundResponse[]; outbounds?: JTLOutboundResponse[]; count?: number; nextPageLink?: string }>(endpoint);
     // JTL API returns items, not outbounds (similar to products endpoint)
     const outbounds = response.items || response.outbounds || [];
     console.log(`[JTL] getOutbounds response: count=${response.count}, items.length=${outbounds.length}`);
     return outbounds;
+  }
+
+  /**
+   * Fetch ALL outbounds with automatic pagination
+   * JTL FFN default page size is 50
+   */
+  async getAllOutbounds(params: {
+    status?: string;
+    warehouseId?: string;
+  } = {}): Promise<JTLOutboundResponse[]> {
+    const allOutbounds: JTLOutboundResponse[] = [];
+    let skip = 0;
+    const top = 50; // JTL default page size
+    let pageCount = 0;
+
+    console.log(`[JTL] Starting to fetch all outbounds (50 per page)...`);
+
+    while (true) {
+      pageCount++;
+      const outbounds = await this.getOutbounds({
+        ...params,
+        top,
+        skip,
+      });
+
+      if (outbounds.length === 0) {
+        break;
+      }
+
+      allOutbounds.push(...outbounds);
+      console.log(`[JTL] Page ${pageCount}: Fetched ${outbounds.length} outbounds (Total: ${allOutbounds.length})`);
+
+      if (outbounds.length < top) {
+        // Last page
+        break;
+      }
+
+      skip += top;
+      await this.delay(200); // Rate limiting
+    }
+
+    console.log(`[JTL] Outbound fetch complete: ${allOutbounds.length} total outbounds in ${pageCount} pages`);
+    return allOutbounds;
   }
 
   /**
@@ -629,22 +690,65 @@ export class JTLService {
 
   /**
    * Get product by merchant SKU
+   * Note: JTL API doesn't properly filter by merchantSku in query params,
+   * so we fetch all products with pagination and filter client-side
+   * Uses OData-style parameters: $top, $skip
    */
   async getProductByMerchantSku(merchantSku: string): Promise<JTLProductResponse | null> {
-    // Note: JTL API doesn't properly filter by merchantSku in query params,
-    // so we fetch all products and filter client-side
-    const products = await this.getProducts({ merchantSku, limit: 100 });
+    let skip = 0;
+    const top = 50; // JTL default page size
+    let totalChecked = 0;
+    let totalCount: number | undefined;
 
-    // Filter client-side since JTL API returns all products regardless of merchantSku filter
-    const matchingProduct = products.find(p => p.merchantSku === merchantSku);
+    console.log(`[JTL] Searching for product with merchantSku: ${merchantSku}`);
 
-    if (matchingProduct) {
-      console.log(`[JTL] Found matching product for merchantSku ${merchantSku}: jfsku=${matchingProduct.jfsku}`);
-    } else {
-      console.log(`[JTL] No product found with merchantSku ${merchantSku} (checked ${products.length} products)`);
+    while (true) {
+      const queryParams = new URLSearchParams();
+      queryParams.set('$top', String(top));
+      queryParams.set('$skip', String(skip));
+
+      const query = queryParams.toString();
+      const endpoint = `/v1/merchant/products?${query}`;
+
+      const response = await this.request<{ items: JTLProductResponse[]; count?: number }>(endpoint);
+      const products = response.items || [];
+
+      // Track total count from first response
+      if (totalCount === undefined && response.count !== undefined) {
+        totalCount = response.count;
+        console.log(`[JTL] Total products in JTL: ${totalCount}`);
+      }
+
+      if (products.length === 0) {
+        console.log(`[JTL] No more products to check. Total checked: ${totalChecked}`);
+        break;
+      }
+
+      totalChecked += products.length;
+
+      // Filter client-side since JTL API returns all products regardless of merchantSku filter
+      const matchingProduct = products.find(p => p.merchantSku === merchantSku);
+
+      if (matchingProduct) {
+        console.log(`[JTL] Found matching product for merchantSku ${merchantSku}: jfsku=${matchingProduct.jfsku} (checked ${totalChecked} products)`);
+        return matchingProduct;
+      }
+
+      console.log(`[JTL] Page ${Math.floor(skip / top) + 1}: Checked ${products.length} products, no match yet (total: ${totalChecked})`);
+
+      // If we got fewer products than the limit, we've reached the end
+      if (products.length < top) {
+        break;
+      }
+
+      skip += top;
+
+      // Rate limiting delay
+      await this.delay(200);
     }
 
-    return matchingProduct || null;
+    console.log(`[JTL] No product found with merchantSku ${merchantSku} (checked ${totalChecked} of ${totalCount || 'unknown'} total products)`);
+    return null;
   }
 
   /**
@@ -1293,7 +1397,7 @@ export class JTLService {
   }> {
     try {
       // Get all outbounds and aggregate by status
-      const outbounds = await this.getOutbounds({ limit: 1000 });
+      const outbounds = await this.getAllOutbounds();
 
       const stats = {
         total: outbounds.length,

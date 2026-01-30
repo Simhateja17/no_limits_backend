@@ -1068,36 +1068,15 @@ export class SyncOrchestrator {
     const errors: string[] = [];
 
     try {
-      // Fetch all outbounds from JTL (paginated)
-      let offset = 0;
-      const limit = 100;
-      let hasMore = true;
-      const allOutbounds: Array<{ id: string; merchantOutboundNumber: string; status: string }> = [];
+      // Fetch all outbounds from JTL (paginated automatically)
+      const jtlOutbounds = await this.jtlService.getAllOutbounds();
 
-      let pageCount = 0;
-      while (hasMore) {
-        pageCount++;
-        const outbounds = await this.jtlService.getOutbounds({ limit, offset });
-
-        for (const outbound of outbounds) {
-          allOutbounds.push({
-            id: outbound.outboundId,
-            merchantOutboundNumber: outbound.merchantOutboundNumber,
-            status: outbound.status,
-          });
-        }
-
-        console.log(`[JTL] Page ${pageCount}: Fetched ${outbounds.length} outbounds (Total: ${allOutbounds.length})`);
-
-        if (outbounds.length < limit) {
-          hasMore = false;
-        } else {
-          offset += limit;
-          await new Promise(resolve => setTimeout(resolve, 200)); // Rate limiting
-        }
-      }
-
-      console.log(`[JTL] Outbound fetch complete: ${allOutbounds.length} total outbounds in ${pageCount} pages`);
+      // Map to our internal structure
+      const allOutbounds: Array<{ id: string; merchantOutboundNumber: string; status: string }> = jtlOutbounds.map(outbound => ({
+        id: outbound.outboundId,
+        merchantOutboundNumber: outbound.merchantOutboundNumber,
+        status: outbound.status,
+      }));
 
       // Get all orders for this channel that don't have a jtlOutboundId yet
       const unlinkdOrders = await this.prisma.order.findMany({
@@ -1922,25 +1901,13 @@ export class SyncOrchestrator {
       if (this.jtlService) {
         console.log(`[SyncOrchestrator] Fetching outbound statuses from JTL FFN...`);
 
-        // Fetch outbounds in batches
-        let offset = 0;
-        const limit = 100;
-        let hasMore = true;
+        // Fetch all outbounds (handles pagination automatically)
+        const outbounds = await this.jtlService.getAllOutbounds();
 
-        while (hasMore) {
-          const outbounds = await this.jtlService.getOutbounds({ limit, offset });
-
-          for (const outbound of outbounds) {
-            outboundMap.set(outbound.outboundId, {
-              status: outbound.status,
-            });
-          }
-
-          if (outbounds.length < limit) {
-            hasMore = false;
-          } else {
-            offset += limit;
-          }
+        for (const outbound of outbounds) {
+          outboundMap.set(outbound.outboundId, {
+            status: outbound.status,
+          });
         }
 
         console.log(`[SyncOrchestrator] Fetched ${outboundMap.size} outbounds from JTL`);
