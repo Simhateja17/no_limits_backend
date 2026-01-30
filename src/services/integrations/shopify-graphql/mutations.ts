@@ -370,7 +370,6 @@ export const FULFILLMENT_CREATE_MUTATION = `
               quantity
               lineItem {
                 id
-                legacyResourceId
               }
             }
           }
@@ -388,7 +387,6 @@ export const FULFILLMENT_CREATE_MUTATION = `
       userErrors {
         field
         message
-        code
       }
     }
   }
