@@ -84,6 +84,8 @@ export class FulfillmentSyncService {
         accessToken: encryptionService.safeDecrypt(jtlConfig.accessToken),
         refreshToken: jtlConfig.refreshToken ? encryptionService.safeDecrypt(jtlConfig.refreshToken) : undefined,
         tokenExpiresAt: jtlConfig.tokenExpiresAt || undefined,
+        warehouseId: jtlConfig.warehouseId || undefined,
+        fulfillerId: jtlConfig.fulfillerId || undefined,
       });
     } catch (error) {
       console.error('[FulfillmentSync] Failed to get JTL service:', error);
