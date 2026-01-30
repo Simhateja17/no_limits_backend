@@ -1542,21 +1542,42 @@ export class JTLService {
     error?: string;
   }> {
     try {
-      // JTL API returns an array directly, not wrapped in { packages: [...] }
+      // JTL API returns an array of shipping notifications, each containing a packages array
+      // Response format: [{ outboundId, packages: [{ freightOption, trackingUrl, identifier: [...] }], ... }]
       const response = await this.request<Array<{
-        freightOption: string;
-        estimatedDeliveryDate?: string;
-        trackingUrl?: string;
-        identifier: Array<{
-          value: string;
-          identifierType: string;
-          name?: string;
+        outboundId?: string;
+        fulfillerId?: string;
+        fulfillerShippingNotificationNumber?: string;
+        merchantOutboundNumber?: string;
+        outboundShippingNotificationId?: string;
+        outboundStatus?: string;
+        note?: string;
+        items?: Array<any>;
+        packages?: Array<{
+          freightOption: string;
+          estimatedDeliveryDate?: string;
+          trackingUrl?: string;
+          identifier: Array<{
+            value: string;
+            identifierType: string;
+            name?: string;
+          }>;
         }>;
       }>>(`/v1/merchant/outbounds/${outboundId}/shipping-notifications`);
 
-      // Wrap the array response to match our expected structure
-      const packages = Array.isArray(response) ? response : [];
-      console.log(`[JTL] Shipping notifications for ${outboundId}: ${packages.length} packages`);
+      // Extract packages from all shipping notifications and flatten into a single array
+      const notifications = Array.isArray(response) ? response : [];
+      console.log(`[JTL] Shipping notifications for ${outboundId}: ${notifications.length} notifications`);
+
+      // Log the raw response structure for debugging
+      if (notifications.length > 0) {
+        console.log(`[JTL] First notification keys:`, Object.keys(notifications[0]));
+        console.log(`[JTL] First notification packages:`, notifications[0].packages);
+      }
+
+      // Flatten packages from all notifications
+      const packages = notifications.flatMap(notification => notification.packages || []);
+      console.log(`[JTL] Total packages extracted: ${packages.length}`);
 
       return { success: true, data: { packages } };
     } catch (error: any) {
