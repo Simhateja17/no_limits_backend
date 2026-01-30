@@ -1074,6 +1074,26 @@ export class ProductSyncService {
       }
     }
 
+    // No local jtlProductId - check if product already exists in JTL by SKU
+    console.log(`[ProductSync] Checking if product ${product.sku} already exists in JTL...`);
+    const existingJtlProduct = await jtlService.getProductByMerchantSku(product.sku);
+
+    if (existingJtlProduct) {
+      // Product exists in JTL but we didn't have the JFSKU locally - update our DB and return
+      console.log(`[ProductSync] Found existing JTL product ${existingJtlProduct.jfsku} for SKU: ${product.sku} - linking to local product`);
+
+      await this.prisma.product.update({
+        where: { id: product.id },
+        data: {
+          jtlProductId: existingJtlProduct.jfsku,
+          jtlSyncStatus: 'SYNCED',
+          lastJtlSync: new Date(),
+        },
+      });
+
+      return existingJtlProduct.jfsku;
+    }
+
     // Product doesn't exist in JTL yet - CREATE it
     console.log(`[ProductSync] Creating new JTL product for SKU: ${product.sku}`);
 
