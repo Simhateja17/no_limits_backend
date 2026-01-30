@@ -100,7 +100,10 @@ export class ShopifyService {
   } = {}): Promise<ShopifyOrder[]> {
     const allOrders: ShopifyOrder[] = [];
     let sinceId: number | undefined;
-    
+    let pageCount = 0;
+
+    console.log(`[Shopify] Starting order fetch (250 per page)...`);
+
     while (true) {
       const orders = await this.getOrders({
         ...params,
@@ -110,13 +113,17 @@ export class ShopifyService {
 
       if (orders.length === 0) break;
 
+      pageCount++;
       allOrders.push(...orders);
       sinceId = orders[orders.length - 1].id;
+
+      console.log(`[Shopify] Page ${pageCount}: Fetched ${orders.length} orders (Total: ${allOrders.length})`);
 
       // Small delay to avoid rate limiting
       await this.delay(500);
     }
 
+    console.log(`[Shopify] Order fetch complete: ${allOrders.length} total orders in ${pageCount} pages`);
     return allOrders;
   }
 

@@ -134,7 +134,9 @@ export class WooCommerceService {
   } = {}): Promise<WooCommerceOrder[]> {
     const allOrders: WooCommerceOrder[] = [];
     let page = 1;
-    
+
+    console.log(`[WooCommerce] Starting order fetch (100 per page)...`);
+
     while (true) {
       const orders = await this.getOrders({
         ...params,
@@ -145,15 +147,18 @@ export class WooCommerceService {
       if (orders.length === 0) break;
 
       allOrders.push(...orders);
-      
+
+      console.log(`[WooCommerce] Page ${page}: Fetched ${orders.length} orders (Total: ${allOrders.length})`);
+
       if (orders.length < 100) break;
-      
+
       page++;
-      
+
       // Small delay to avoid rate limiting
       await this.delay(300);
     }
 
+    console.log(`[WooCommerce] Order fetch complete: ${allOrders.length} total orders in ${page} pages`);
     return allOrders;
   }
 

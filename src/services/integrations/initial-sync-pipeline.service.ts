@@ -602,18 +602,23 @@ export class InitialSyncPipelineService {
     const result = await productSyncService.pushToJTLOnly(pipeline.clientId);
 
     console.log(`[SyncPipeline] Step 3 complete:`);
-    console.log(`[SyncPipeline]   - ${result.synced} synced to JTL`);
-    console.log(`[SyncPipeline]   - ${result.skipped} skipped (already linked)`);
+    console.log(`[SyncPipeline]   - ${result.synced} created in JTL`);
+    console.log(`[SyncPipeline]   - ${result.skippedAlreadyLinked} linked to existing JTL products (no duplicate push)`);
+    console.log(`[SyncPipeline]   - ${result.skipped} skipped (already linked in DB)`);
     console.log(`[SyncPipeline]   - ${result.skippedManualLink} skipped - have generated SKUs and need manual linking`);
     console.log(`[SyncPipeline]   - ${result.failed} failed`);
 
+    if (result.skippedAlreadyLinked > 0) {
+      console.log(`[SyncPipeline] ${result.skippedAlreadyLinked} products were found in JTL by SKU match and linked (avoided duplicate creation)`);
+    }
+
     if (result.skippedManualLink > 0) {
-      console.log(`[SyncPipeline] ⚠️ ${result.skippedManualLink} products have generated SKUs (SHOP-xxx/WOO-xxx) and need manual linking in the Products table`);
+      console.log(`[SyncPipeline] ${result.skippedManualLink} products have generated SKUs (SHOP-xxx/WOO-xxx) and need manual linking in the Products table`);
     }
 
     return {
       success: result.failed === 0,
-      itemsProcessed: result.synced + result.skipped + result.skippedManualLink,
+      itemsProcessed: result.synced + result.skippedAlreadyLinked + result.skipped + result.skippedManualLink,
       itemsFailed: result.failed,
       error: result.errors.length > 0 ? result.errors.join('; ') : undefined,
     };

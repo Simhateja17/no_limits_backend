@@ -1730,6 +1730,7 @@ export class ProductSyncService {
     totalProducts: number;
     synced: number;
     skipped: number;
+    skippedAlreadyLinked: number;
     skippedManualLink: number;
     failed: number;
     errors: string[];
@@ -1760,13 +1761,13 @@ export class ProductSyncService {
     });
 
     console.log(`[ProductSync] Found ${allUnlinkedProducts.length} unlinked products:`);
-    console.log(`[ProductSync]   - ${productsToSync.length} with real SKUs → will push to JTL`);
+    console.log(`[ProductSync]   - ${productsToSync.length} with real SKUs → will check JTL first`);
     console.log(`[ProductSync]   - ${productsNeedingManualLink.length} with generated SKUs (SHOP-xxx/WOO-xxx) → need manual linking`);
     console.log(`[ProductSync]   - ${linkedCount} already linked to JTL`);
 
     // Log which products need manual linking for visibility
     if (productsNeedingManualLink.length > 0) {
-      console.log(`[ProductSync] ⚠️ Products needing manual linking:`);
+      console.log(`[ProductSync] Products needing manual linking:`);
       productsNeedingManualLink.slice(0, 10).forEach(p => {
         console.log(`[ProductSync]   - ${p.sku}`);
       });
@@ -1779,11 +1780,73 @@ export class ProductSyncService {
     const products = productsToSync;
 
     let synced = 0;
+    let skippedAlreadyLinked = 0;
     let failed = 0;
     const errors: string[] = [];
 
+    // Fetch ALL JTL products for this client to check for existing ones
+    // This prevents duplicate product creation errors
+    let jtlProductMap = new Map<string, string>(); // merchantSku → jfsku
+    try {
+      const jtlConfig = await this.prisma.jtlConfig.findUnique({
+        where: { clientId_fk: clientId },
+      });
+
+      if (jtlConfig && jtlConfig.isActive && jtlConfig.accessToken) {
+        const encryptionService = getEncryptionService();
+        const jtlService = new JTLService({
+          clientId: jtlConfig.clientId,
+          clientSecret: encryptionService.safeDecrypt(jtlConfig.clientSecret),
+          accessToken: encryptionService.safeDecrypt(jtlConfig.accessToken),
+          refreshToken: jtlConfig.refreshToken ? encryptionService.safeDecrypt(jtlConfig.refreshToken) : undefined,
+          tokenExpiresAt: jtlConfig.tokenExpiresAt || undefined,
+          fulfillerId: jtlConfig.fulfillerId,
+          warehouseId: jtlConfig.warehouseId,
+          environment: jtlConfig.environment as 'sandbox' | 'production',
+        }, this.prisma, clientId);
+
+        console.log(`[ProductSync] Fetching existing JTL products to check for duplicates...`);
+        const jtlProducts = await jtlService.getAllProductsWithStock();
+        console.log(`[ProductSync] Found ${jtlProducts.length} products in JTL FFN`);
+
+        for (const jp of jtlProducts) {
+          if (jp.merchantSku) {
+            jtlProductMap.set(jp.merchantSku, jp.jfsku);
+          }
+        }
+        console.log(`[ProductSync] Built JTL product map with ${jtlProductMap.size} SKU mappings`);
+      } else {
+        console.log(`[ProductSync] Warning: No active JTL config found, will attempt push without pre-check`);
+      }
+    } catch (error) {
+      console.log(`[ProductSync] Warning: Failed to fetch JTL products for pre-check:`, error);
+      // Continue anyway - will fall back to old behavior with potential duplicate errors
+    }
+
     for (const product of products) {
-      // Push ONLY to JTL (skip Shopify and WooCommerce)
+      // Check if product already exists in JTL by SKU
+      const existingJfsku = jtlProductMap.get(product.sku);
+      if (existingJfsku) {
+        // Product already exists in JTL - just link it, don't create
+        try {
+          await this.prisma.product.update({
+            where: { id: product.id },
+            data: {
+              jtlProductId: existingJfsku,
+              jtlSyncStatus: 'SYNCED',
+              lastJtlSync: new Date(),
+            },
+          });
+          console.log(`[ProductSync] Linked existing JTL product: ${product.sku} → ${existingJfsku}`);
+          skippedAlreadyLinked++;
+          continue; // Skip the push
+        } catch (linkError) {
+          console.log(`[ProductSync] Failed to link existing product ${product.sku}:`, linkError);
+          // Fall through to try pushing anyway
+        }
+      }
+
+      // Product doesn't exist in JTL - push it
       const result = await this.pushProductToAllPlatforms(
         product.id,
         'system',
@@ -1792,12 +1855,12 @@ export class ProductSyncService {
 
       if (result.success) {
         synced++;
-        console.log(`[ProductSync] ✅ Pushed ${product.sku} to JTL`);
+        console.log(`[ProductSync] Pushed ${product.sku} to JTL`);
       } else {
         failed++;
         if (result.error) {
           errors.push(`${product.sku}: ${result.error}`);
-          console.log(`[ProductSync] ❌ Failed to push ${product.sku}: ${result.error}`);
+          console.log(`[ProductSync] Failed to push ${product.sku}: ${result.error}`);
         }
       }
 
@@ -1805,12 +1868,13 @@ export class ProductSyncService {
       await new Promise(resolve => setTimeout(resolve, 200));
     }
 
-    console.log(`[ProductSync] JTL-only push complete: ${synced} synced, ${failed} failed, ${linkedCount} skipped (already linked), ${productsNeedingManualLink.length} need manual linking`);
+    console.log(`[ProductSync] JTL-only push complete: ${synced} created, ${skippedAlreadyLinked} linked existing, ${failed} failed, ${linkedCount} skipped (already linked), ${productsNeedingManualLink.length} need manual linking`);
 
     return {
       totalProducts: allUnlinkedProducts.length + linkedCount,
       synced,
       skipped: linkedCount,
+      skippedAlreadyLinked,
       skippedManualLink: productsNeedingManualLink.length,
       failed,
       errors,
