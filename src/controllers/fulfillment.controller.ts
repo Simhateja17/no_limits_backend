@@ -1151,6 +1151,7 @@ export const bulkFulfillOrders = async (req: Request, res: Response): Promise<vo
 export const syncOrderToJTL = async (req: Request, res: Response): Promise<void> => {
   try {
     const { orderId } = req.params;
+    const user = (req as any).user;
 
     const order = await prisma.order.findUnique({
       where: { id: orderId },
@@ -1160,6 +1161,15 @@ export const syncOrderToJTL = async (req: Request, res: Response): Promise<void>
       res.status(404).json({
         success: false,
         error: 'Order not found',
+      });
+      return;
+    }
+
+    // Permission check: Clients can only sync their own orders
+    if (user.role === 'CLIENT' && order.clientId !== user.clientId) {
+      res.status(403).json({
+        success: false,
+        error: 'Insufficient permissions',
       });
       return;
     }

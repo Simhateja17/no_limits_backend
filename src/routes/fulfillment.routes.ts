@@ -54,8 +54,8 @@ router.post('/orders/:orderId/tracking', updateTracking);
 // POST /api/fulfillment/orders/:orderId/fulfill - Create fulfillment
 router.post('/orders/:orderId/fulfill', createFulfillment);
 
-// POST /api/fulfillment/orders/:orderId/sync-to-jtl - Sync to JTL FFN
-router.post('/orders/:orderId/sync-to-jtl', requireAdmin, syncOrderToJTL);
+// POST /api/fulfillment/orders/:orderId/sync-to-jtl - Sync to JTL FFN (clients can sync their own orders)
+router.post('/orders/:orderId/sync-to-jtl', syncOrderToJTL);
 
 // ============= BULK OPERATIONS =============
 // POST /api/fulfillment/bulk/hold - Bulk hold orders
