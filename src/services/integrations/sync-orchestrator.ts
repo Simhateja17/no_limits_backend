@@ -1376,31 +1376,50 @@ export class SyncOrchestrator {
 
         // Map status to Shopify fulfillment status
         const fulfillmentStatus = this.mapStatusToShopifyFulfillment(status);
-        
+
         if (fulfillmentStatus === 'fulfilled' && order.trackingNumber) {
           // Create fulfillment with tracking info
           const externalOrderId = order.externalOrderId ? parseInt(order.externalOrderId) : null;
           if (externalOrderId) {
-            // Use default location_id (in production, this should be stored in channel config)
-            // Shopify requires location_id for fulfillments - using 1 as default
-            const locationId = 1;
-            
-            await shopifyService.createFulfillment(
-              externalOrderId,
-              {
-                location_id: locationId,
-                tracking_number: order.trackingNumber,
-                tracking_company: order.carrierSelection || undefined,
-                notify_customer: true,
-                line_items: order.items.map((item, index) => ({
-                  id: index + 1, // Shopify line item IDs are 1-indexed
-                  quantity: item.quantity,
-                })),
+            try {
+              // Get the first active location for fulfillment
+              // The GraphQL service handles this automatically, but REST needs it
+              let locationId = 1; // Default fallback
+              try {
+                // Check if getLocations method exists (REST service has it, GraphQL doesn't)
+                if ('getLocations' in shopifyService && typeof (shopifyService as any).getLocations === 'function') {
+                  const locations = await (shopifyService as any).getLocations();
+                  const activeLocation = locations.find((loc: { id: number; name: string; active: boolean }) => loc.active);
+                  if (activeLocation) {
+                    locationId = activeLocation.id;
+                  }
+                }
+              } catch (locError) {
+                console.log(`[SyncOrchestrator] Could not fetch locations, using default: ${locError}`);
               }
-            );
-          }
 
-          console.log(`[SyncOrchestrator] Created Shopify fulfillment for order ${orderId}`);
+              await shopifyService.createFulfillment(
+                externalOrderId,
+                {
+                  location_id: locationId,
+                  tracking_number: order.trackingNumber,
+                  tracking_company: order.carrierSelection || undefined,
+                  notify_customer: true,
+                  // Don't pass line_items - let the service fulfill all remaining items
+                }
+              );
+              console.log(`[SyncOrchestrator] Created Shopify fulfillment for order ${orderId}`);
+            } catch (fulfillError: any) {
+              // Handle common fulfillment errors gracefully
+              if (fulfillError.message?.includes('already fulfilled')) {
+                console.log(`[SyncOrchestrator] Order ${orderId} already fulfilled in Shopify`);
+              } else if (fulfillError.message?.includes('on hold')) {
+                console.log(`[SyncOrchestrator] Order ${orderId} is on hold in Shopify: ${fulfillError.message}`);
+              } else {
+                throw fulfillError;
+              }
+            }
+          }
         } else if (fulfillmentStatus && order.externalOrderId) {
           // Update order status
           const externalOrderId = parseInt(order.externalOrderId);
@@ -1849,6 +1868,158 @@ export class SyncOrchestrator {
       jtlOutboundUpdates,
       jtlReturnUpdates,
     };
+  }
+
+  /**
+   * Sync historical order statuses from JTL FFN
+   * This method:
+   * 1. Gets all orders for the channel that have jtlOutboundId
+   * 2. Fetches their current status from JTL FFN
+   * 3. Updates the local database
+   * 4. Pushes the status to the channel (Shopify/WooCommerce)
+   */
+  async syncHistoricalOrderStatuses(): Promise<{
+    success: boolean;
+    totalOrders: number;
+    statusesUpdated: number;
+    channelsPushed: number;
+    errors: string[];
+  }> {
+    console.log(`[SyncOrchestrator] Starting historical order status sync for channel ${this.config.channelId}`);
+
+    const result = {
+      success: true,
+      totalOrders: 0,
+      statusesUpdated: 0,
+      channelsPushed: 0,
+      errors: [] as string[],
+    };
+
+    try {
+      // Get all orders for this channel that have JTL outbound IDs
+      const orders = await this.prisma.order.findMany({
+        where: {
+          channelId: this.config.channelId,
+          jtlOutboundId: { not: null },
+        },
+        include: {
+          channel: true,
+          items: true,
+        },
+      });
+
+      result.totalOrders = orders.length;
+      console.log(`[SyncOrchestrator] Found ${orders.length} orders with JTL outbound IDs`);
+
+      if (orders.length === 0) {
+        console.log(`[SyncOrchestrator] No orders with JTL outbound IDs found`);
+        return result;
+      }
+
+      // Fetch all outbounds from JTL to get their statuses
+      const outboundMap = new Map<string, { status: string; trackingNumber?: string; carrierName?: string }>();
+
+      if (this.jtlService) {
+        console.log(`[SyncOrchestrator] Fetching outbound statuses from JTL FFN...`);
+
+        // Fetch outbounds in batches
+        let offset = 0;
+        const limit = 100;
+        let hasMore = true;
+
+        while (hasMore) {
+          const outbounds = await this.jtlService.getOutbounds({ limit, offset });
+
+          for (const outbound of outbounds) {
+            outboundMap.set(outbound.outboundId, {
+              status: outbound.status,
+            });
+          }
+
+          if (outbounds.length < limit) {
+            hasMore = false;
+          } else {
+            offset += limit;
+          }
+        }
+
+        console.log(`[SyncOrchestrator] Fetched ${outboundMap.size} outbounds from JTL`);
+      }
+
+      // Process each order
+      for (const order of orders) {
+        try {
+          const jtlOutbound = outboundMap.get(order.jtlOutboundId!);
+
+          if (!jtlOutbound) {
+            console.log(`[SyncOrchestrator] Outbound ${order.jtlOutboundId} not found in JTL for order ${order.id}`);
+            continue;
+          }
+
+          // Map JTL status to internal status
+          const newStatus = this.mapJTLStatusToInternal(jtlOutbound.status);
+          const currentStatus = order.status;
+
+          // Only update if status changed
+          if (newStatus !== currentStatus) {
+            console.log(`[SyncOrchestrator] Order ${order.orderNumber}: ${currentStatus} -> ${newStatus}`);
+
+            // Update local database
+            await this.prisma.order.update({
+              where: { id: order.id },
+              data: {
+                status: newStatus as any,
+                updatedAt: new Date(),
+              },
+            });
+
+            result.statusesUpdated++;
+
+            // Push to channel if order is shipped/delivered
+            if (newStatus === 'SHIPPED' || newStatus === 'DELIVERED') {
+              try {
+                await this.updateChannelOrderStatus(order.id, newStatus);
+                result.channelsPushed++;
+                console.log(`[SyncOrchestrator] Pushed status to channel for order ${order.orderNumber}`);
+              } catch (channelError: any) {
+                console.error(`[SyncOrchestrator] Failed to push to channel for order ${order.orderNumber}:`, channelError.message);
+                result.errors.push(`Order ${order.orderNumber}: Failed to push to channel - ${channelError.message}`);
+              }
+            }
+          }
+        } catch (orderError: any) {
+          console.error(`[SyncOrchestrator] Error processing order ${order.orderNumber}:`, orderError.message);
+          result.errors.push(`Order ${order.orderNumber}: ${orderError.message}`);
+        }
+      }
+
+      console.log(`[SyncOrchestrator] Historical sync complete: ${result.statusesUpdated} statuses updated, ${result.channelsPushed} pushed to channels`);
+
+    } catch (error: any) {
+      console.error(`[SyncOrchestrator] Historical order status sync failed:`, error);
+      result.success = false;
+      result.errors.push(error.message);
+    }
+
+    return result;
+  }
+
+  /**
+   * Map JTL outbound status to internal order status
+   */
+  private mapJTLStatusToInternal(jtlStatus: string): string {
+    const statusMap: Record<string, string> = {
+      'Open': 'PENDING',
+      'InProgress': 'PROCESSING',
+      'Sent': 'SHIPPED',
+      'Delivered': 'DELIVERED',
+      'Cancelled': 'CANCELLED',
+      'PartiallyShipped': 'PROCESSING',
+      'OnHold': 'ON_HOLD',
+      'Returned': 'RETURNED',
+    };
+
+    return statusMap[jtlStatus] || 'PENDING';
   }
 }
 

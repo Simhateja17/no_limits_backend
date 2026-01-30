@@ -2745,6 +2745,103 @@ router.post('/product-sync/client/:clientId/import-from-jtl', authenticate, asyn
 });
 
 /**
+ * Sync historical order statuses from JTL FFN
+ * This fetches order statuses from JTL, updates local DB, and pushes to channels (Shopify/WooCommerce)
+ */
+router.post('/channel/:channelId/sync-order-statuses', authenticate, async (req: Request, res: Response) => {
+  try {
+    const { channelId } = req.params;
+
+    // Get channel with credentials and client info
+    const channel = await prisma.channel.findUnique({
+      where: { id: channelId },
+      include: { client: true },
+    });
+
+    if (!channel) {
+      return res.status(404).json({
+        success: false,
+        error: 'Channel not found',
+      });
+    }
+
+    // Get JTL config for the client
+    const jtlConfig = await prisma.jtlConfig.findUnique({
+      where: { clientId_fk: channel.clientId },
+    });
+
+    if (!jtlConfig) {
+      return res.status(400).json({
+        success: false,
+        error: 'JTL configuration not found for client. Please configure JTL credentials first.',
+      });
+    }
+
+    const encryptionService = getEncryptionService();
+
+    // Create JTL service
+    const jtlService = new JTLService({
+      clientId: encryptionService.safeDecrypt(jtlConfig.clientId),
+      clientSecret: encryptionService.safeDecrypt(jtlConfig.clientSecret),
+      fulfillerId: jtlConfig.fulfillerId,
+      warehouseId: jtlConfig.warehouseId,
+      environment: jtlConfig.environment as 'sandbox' | 'production',
+      accessToken: jtlConfig.accessToken ? encryptionService.safeDecrypt(jtlConfig.accessToken) : undefined,
+      refreshToken: jtlConfig.refreshToken ? encryptionService.safeDecrypt(jtlConfig.refreshToken) : undefined,
+    });
+
+    // Suppress unused variable warning - jtlService is used through orchestrator
+    void jtlService;
+
+    // Build sync orchestrator config
+    const orchestratorConfig: any = {
+      channelId: channel.id,
+      channelType: channel.type,
+      jtlClientId: encryptionService.safeDecrypt(jtlConfig.clientId),
+      jtlClientSecret: encryptionService.safeDecrypt(jtlConfig.clientSecret),
+      jtlFulfillerId: jtlConfig.fulfillerId,
+      jtlWarehouseId: jtlConfig.warehouseId,
+      jtlEnvironment: jtlConfig.environment as 'sandbox' | 'production',
+    };
+
+    // Add channel-specific credentials
+    if (channel.type === 'SHOPIFY') {
+      orchestratorConfig.shopifyShopDomain = channel.shopDomain;
+      orchestratorConfig.shopifyAccessToken = channel.accessToken
+        ? encryptionService.safeDecrypt(channel.accessToken)
+        : undefined;
+    } else if (channel.type === 'WOOCOMMERCE') {
+      orchestratorConfig.wooCommerceUrl = channel.apiUrl;
+      orchestratorConfig.wooCommerceKey = channel.apiClientId
+        ? encryptionService.safeDecrypt(channel.apiClientId)
+        : undefined;
+      orchestratorConfig.wooCommerceSecret = channel.apiClientSecret
+        ? encryptionService.safeDecrypt(channel.apiClientSecret)
+        : undefined;
+    }
+
+    // Import SyncOrchestrator dynamically to avoid circular deps
+    const { default: SyncOrchestrator } = await import('../services/integrations/sync-orchestrator.js');
+    const orchestrator = new SyncOrchestrator(prisma, orchestratorConfig);
+
+    console.log(`[API] Starting historical order status sync for channel ${channelId}`);
+    const result = await orchestrator.syncHistoricalOrderStatuses();
+
+    res.json({
+      success: result.success,
+      message: `Synced ${result.statusesUpdated} order statuses, pushed ${result.channelsPushed} to channel`,
+      data: result,
+    });
+  } catch (error) {
+    console.error('Error syncing historical order statuses:', error);
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+});
+
+/**
  * Get sync queue processor metrics
  */
 router.get('/product-sync/metrics', authenticate, (req: Request, res: Response) => {
