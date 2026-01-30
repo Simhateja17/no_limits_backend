@@ -3370,7 +3370,7 @@ router.post('/channel/:channelId/fetch-all-products', authenticate, async (req: 
       jtlCredentials: {
         clientId: jtlConfig.clientId,
         clientSecret: encryptionService.safeDecrypt(jtlConfig.clientSecret),
-        accessToken: encryptionService.safeDecrypt(jtlConfig.accessToken) || undefined,
+        accessToken: jtlConfig.accessToken ? encryptionService.safeDecrypt(jtlConfig.accessToken) : undefined,
         refreshToken: jtlConfig.refreshToken ? encryptionService.safeDecrypt(jtlConfig.refreshToken) : undefined,
         environment: jtlConfig.environment as 'sandbox' | 'production',
       },
@@ -3479,7 +3479,7 @@ router.post('/channel/:channelId/fetch-all-orders', authenticate, async (req: Re
       jtlCredentials: {
         clientId: jtlConfig.clientId,
         clientSecret: encryptionService.safeDecrypt(jtlConfig.clientSecret),
-        accessToken: encryptionService.safeDecrypt(jtlConfig.accessToken) || undefined,
+        accessToken: jtlConfig.accessToken ? encryptionService.safeDecrypt(jtlConfig.accessToken) : undefined,
         refreshToken: jtlConfig.refreshToken ? encryptionService.safeDecrypt(jtlConfig.refreshToken) : undefined,
         environment: jtlConfig.environment as 'sandbox' | 'production',
       },
@@ -3588,7 +3588,7 @@ router.post('/channel/:channelId/fetch-all', authenticate, async (req: Request, 
       jtlCredentials: {
         clientId: jtlConfig.clientId,
         clientSecret: encryptionService.safeDecrypt(jtlConfig.clientSecret),
-        accessToken: encryptionService.safeDecrypt(jtlConfig.accessToken) || undefined,
+        accessToken: jtlConfig.accessToken ? encryptionService.safeDecrypt(jtlConfig.accessToken) : undefined,
         refreshToken: jtlConfig.refreshToken ? encryptionService.safeDecrypt(jtlConfig.refreshToken) : undefined,
         environment: jtlConfig.environment as 'sandbox' | 'production',
       },
