@@ -383,6 +383,7 @@ export class JTLService {
     const endpoint = `/v1/merchant/outbounds${query ? `?${query}` : ''}`;
 
     console.log(`[JTL] Creating outbound with options: oversale=${oversale}, autoCompleteBillOfMaterials=${autoCompleteBillOfMaterials}`);
+    console.log(`[JTL] Outbound payload:`, JSON.stringify(outbound, null, 2));
 
     return this.request<JTLOutboundResponse>(endpoint, {
       method: 'POST',
@@ -1773,6 +1774,7 @@ export class JTLService {
         };
       }
       console.log(`[JTL-FFN-SYNC] Order not in FFN, creating new outbound...`);
+      console.log(`[JTL-FFN-SYNC] Using credentials - warehouseId: ${this.credentials.warehouseId}, fulfillerId: ${this.credentials.fulfillerId}`);
 
       // Validate required credentials before creating outbound
       if (!this.credentials.warehouseId) {
