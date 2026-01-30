@@ -1178,11 +1178,16 @@ export class SyncOrchestrator {
             linked++;
 
             // If shipped, also update Shopify fulfillment
-            if (outbound.status.toLowerCase() === 'shipped' && updateData.trackingNumber) {
-              try {
-                await this.updateShopifyFulfillmentForOrder(matchedOrder.id, updateData.trackingNumber, updateData.trackingUrl);
-              } catch (shopifyError) {
-                console.error(`[JTL] Failed to update Shopify fulfillment for order ${matchedOrder.orderId}:`, shopifyError);
+            if (outbound.status.toLowerCase() === 'shipped') {
+              if (updateData.trackingNumber) {
+                try {
+                  console.log(`[Shopify] Triggering fulfillment update for order ${matchedOrder.orderId} with tracking ${updateData.trackingNumber}`);
+                  await this.updateShopifyFulfillmentForOrder(matchedOrder.id, updateData.trackingNumber, updateData.trackingUrl);
+                } catch (shopifyError) {
+                  console.error(`[JTL] Failed to update Shopify fulfillment for order ${matchedOrder.orderId}:`, shopifyError);
+                }
+              } else {
+                console.log(`[Shopify] Skipping fulfillment update for order ${matchedOrder.orderId} - no tracking number available`);
               }
             }
 
@@ -2008,7 +2013,10 @@ export class SyncOrchestrator {
               try {
                 // Update Shopify fulfillment with tracking info
                 if (updateData.trackingNumber) {
+                  console.log(`[Shopify] Triggering fulfillment update for order ${order.orderNumber} with tracking ${updateData.trackingNumber}`);
                   await this.updateShopifyFulfillmentForOrder(order.id, updateData.trackingNumber, updateData.trackingUrl);
+                } else {
+                  console.log(`[Shopify] Skipping fulfillment update for order ${order.orderNumber} - no tracking number available`);
                 }
                 await this.updateChannelOrderStatus(order.id, newStatus);
                 result.channelsPushed++;
