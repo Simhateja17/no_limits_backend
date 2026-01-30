@@ -218,7 +218,8 @@ export class ShopifyGraphQLService {
   }
 
   /**
-   * Fetch all orders using pagination
+   * Fetch all orders using cursor-based pagination (GraphQL)
+   * This is the recommended approach for Shopify as it handles pagination correctly
    */
   async getAllOrders(params: {
     status?: 'open' | 'closed' | 'cancelled' | 'any';
@@ -239,6 +240,12 @@ export class ShopifyGraphQLService {
 
     const query = filters.length > 0 ? filters.join(' AND ') : undefined;
 
+    console.log(`[Shopify GraphQL] Starting order fetch (${DEFAULT_PAGE_SIZE} per page, cursor-based pagination)...`);
+    if (query) {
+      console.log(`[Shopify GraphQL] Filter: ${query}`);
+    }
+
+    let pageCount = 0;
     const allOrders = await fetchAllPages<unknown>(
       async (cursor) => {
         const data = await this.graphql<{
@@ -252,14 +259,19 @@ export class ShopifyGraphQLService {
           query,
         });
 
+        pageCount++;
+        const orders = data.orders.edges.map(e => e.node);
+        console.log(`[Shopify GraphQL] Page ${pageCount}: Fetched ${orders.length} orders (cursor: ${cursor || 'start'})`);
+
         return {
-          nodes: data.orders.edges.map(e => e.node),
+          nodes: orders,
           pageInfo: data.orders.pageInfo,
         };
       },
       { delayMs: 500 }
     );
 
+    console.log(`[Shopify GraphQL] Order fetch complete: ${allOrders.length} total orders in ${pageCount} pages`);
     return mapOrders(allOrders as Parameters<typeof mapOrders>[0]);
   }
 
@@ -661,6 +673,53 @@ export class ShopifyGraphQLService {
       return { success: true };
     } catch (error: unknown) {
       return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+    }
+  }
+
+  /**
+   * Create a fulfillment in Shopify with tracking info
+   * This is a convenience method that accepts a GID and handles the fulfillment creation
+   * with tracking information to mark an order as fulfilled
+   *
+   * @param params.orderId - Shopify Order GID (e.g., "gid://shopify/Order/12345")
+   * @param params.trackingNumber - Tracking number from carrier
+   * @param params.trackingUrl - Full tracking URL
+   * @param params.trackingCompany - Carrier name (e.g., "DHL", "UPS")
+   */
+  async createFulfillmentWithTracking(params: {
+    orderId: string;
+    trackingNumber?: string;
+    trackingUrl?: string;
+    trackingCompany?: string;
+  }): Promise<{ success: boolean; fulfillment?: any; error?: string }> {
+    try {
+      // Extract numeric ID from GID
+      const numericId = extractNumericId(params.orderId);
+
+      // Use the existing createFulfillment method
+      const result = await this.createFulfillment(numericId, {
+        tracking_number: params.trackingNumber,
+        tracking_url: params.trackingUrl,
+        tracking_company: params.trackingCompany,
+        notify_customer: true, // Send shipment notification email to customer
+      });
+
+      return {
+        success: true,
+        fulfillment: result,
+      };
+    } catch (error: any) {
+      // Check for already fulfilled error
+      if (error.message?.includes('already fulfilled')) {
+        console.log(`[Shopify] Order ${params.orderId} is already fulfilled`);
+        return { success: true, fulfillment: null };
+      }
+
+      console.error(`[Shopify] Failed to create fulfillment with tracking:`, error.message);
+      return {
+        success: false,
+        error: error.message,
+      };
     }
   }
 

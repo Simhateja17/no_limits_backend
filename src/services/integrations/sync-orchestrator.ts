@@ -6,7 +6,7 @@
  * Flow: Shopify/WooCommerce → No-Limits DB → JTL FFN
  */
 
-import { PrismaClient, ChannelType, OrderStatus, ReturnStatus } from '@prisma/client';
+import { PrismaClient, ChannelType, OrderStatus, ReturnStatus, Prisma } from '@prisma/client';
 import { ShopifyService } from './shopify.service.js';
 import { createShopifyServiceAuto, ShopifyServiceInstance } from './shopify-service-factory.js';
 import { WooCommerceService } from './woocommerce.service.js';
@@ -71,7 +71,9 @@ interface OrderSyncData {
   orderNumber: string;
   items: {
     sku: string;
+    productName?: string;
     quantity: number;
+    unitPrice?: number;
     jtlJfsku?: string;
   }[];
   shippingAddress: JTLAddress;
@@ -629,8 +631,10 @@ export class SyncOrchestrator {
       externalOrderId: String(order.id),
       orderNumber: order.name || String(order.order_number),
       items: order.line_items.map((item: ShopifyLineItem) => ({
-        sku: item.sku,
+        sku: item.sku || `NO-SKU-${item.variant_id || item.product_id}`,
+        productName: item.name || item.title || 'Unknown Product',
         quantity: item.quantity,
+        unitPrice: item.price ? parseFloat(item.price) : undefined,
       })),
       shippingAddress: {
         salutation: undefined,
@@ -658,8 +662,10 @@ export class SyncOrchestrator {
       externalOrderId: String(order.id),
       orderNumber: order.number,
       items: order.line_items.map((item: WooCommerceLineItem) => ({
-        sku: item.sku,
+        sku: item.sku || `NO-SKU-${item.product_id}`,
+        productName: item.name || 'Unknown Product',
         quantity: item.quantity,
+        unitPrice: item.total && item.quantity ? parseFloat(item.total) / item.quantity : undefined,
       })),
       shippingAddress: {
         salutation: undefined,
@@ -740,7 +746,7 @@ export class SyncOrchestrator {
             create: await Promise.all(orderData.items.map(async (item) => {
               // Find product by SKU (only if SKU exists)
               let product = null;
-              if (item.sku) {
+              if (item.sku && !item.sku.startsWith('NO-SKU-')) {
                 product = await this.prisma.product.findFirst({
                   where: { sku: item.sku },
                 });
@@ -750,7 +756,9 @@ export class SyncOrchestrator {
                 productId: product?.id,
                 sku: item.sku || `NO-SKU-${Date.now()}`, // Fallback for items without SKU
                 quantity: item.quantity,
-                productName: product?.name || 'Unknown Product',
+                // Prefer productName from order data, then product lookup, then fallback
+                productName: item.productName || product?.name || 'Unknown Product',
+                unitPrice: item.unitPrice ? new Prisma.Decimal(item.unitPrice) : undefined,
               };
             })),
           },
@@ -1134,18 +1142,48 @@ export class SyncOrchestrator {
             const newStatus = this.mapJTLStatusToOrderStatus(outbound.status);
             const newFulfillmentState = this.mapJTLStatusToFulfillmentState(outbound.status);
 
+            // Prepare update data
+            const updateData: any = {
+              jtlOutboundId: outbound.id,
+              status: newStatus,
+              fulfillmentState: newFulfillmentState as any,
+              lastJtlSync: new Date(),
+            };
+
+            // If status is shipped, fetch tracking info
+            if (outbound.status.toLowerCase() === 'shipped') {
+              try {
+                const notifications = await this.jtlService.getShippingNotifications(outbound.id);
+                if (notifications.success && notifications.data) {
+                  const trackingInfo = this.jtlService.extractTrackingInfo(notifications.data);
+                  if (trackingInfo.trackingNumber) {
+                    updateData.trackingNumber = trackingInfo.trackingNumber;
+                    updateData.trackingUrl = trackingInfo.trackingUrl;
+                    updateData.shippedAt = new Date();
+                    console.log(`[JTL] Updated tracking for order ${matchedOrder.orderId}: ${trackingInfo.trackingNumber}`);
+                  }
+                }
+              } catch (trackingError) {
+                console.error(`[JTL] Failed to fetch tracking for order ${matchedOrder.orderId}:`, trackingError);
+              }
+            }
+
             await this.prisma.order.update({
               where: { id: matchedOrder.id },
-              data: {
-                jtlOutboundId: outbound.id,
-                status: newStatus,
-                fulfillmentState: newFulfillmentState as any,
-                lastJtlSync: new Date(),
-              },
+              data: updateData,
             });
 
             console.log(`[JTL] Linked order ${matchedOrder.orderId} to outbound ${outbound.id} (status: ${outbound.status})`);
             linked++;
+
+            // If shipped, also update Shopify fulfillment
+            if (outbound.status.toLowerCase() === 'shipped' && updateData.trackingNumber) {
+              try {
+                await this.updateShopifyFulfillmentForOrder(matchedOrder.id, updateData.trackingNumber, updateData.trackingUrl);
+              } catch (shopifyError) {
+                console.error(`[JTL] Failed to update Shopify fulfillment for order ${matchedOrder.orderId}:`, shopifyError);
+              }
+            }
 
             // Remove from map so we don't try to link it again
             if (matchedOrder.orderId) orderMap.delete(matchedOrder.orderId.toLowerCase());
@@ -1927,17 +1965,38 @@ export class SyncOrchestrator {
           const newStatus = this.mapJTLStatusToInternal(jtlOutbound.status);
           const currentStatus = order.status;
 
-          // Only update if status changed
-          if (newStatus !== currentStatus) {
+          // Prepare update data
+          const updateData: any = {
+            status: newStatus as any,
+            updatedAt: new Date(),
+          };
+
+          // If status is shipped and no tracking yet, fetch tracking info
+          if ((newStatus === 'SHIPPED' || jtlOutbound.status.toLowerCase() === 'shipped' || jtlOutbound.status === 'Sent') && !order.trackingNumber) {
+            try {
+              const notifications = await this.jtlService.getShippingNotifications(order.jtlOutboundId!);
+              if (notifications.success && notifications.data) {
+                const trackingInfo = this.jtlService.extractTrackingInfo(notifications.data);
+                if (trackingInfo.trackingNumber) {
+                  updateData.trackingNumber = trackingInfo.trackingNumber;
+                  updateData.trackingUrl = trackingInfo.trackingUrl;
+                  updateData.shippedAt = updateData.shippedAt || new Date();
+                  console.log(`[SyncOrchestrator] Fetched tracking for order ${order.orderNumber}: ${trackingInfo.trackingNumber}`);
+                }
+              }
+            } catch (trackingError) {
+              console.error(`[SyncOrchestrator] Failed to fetch tracking for order ${order.orderNumber}:`, trackingError);
+            }
+          }
+
+          // Only update if status changed or we have new tracking info
+          if (newStatus !== currentStatus || updateData.trackingNumber) {
             console.log(`[SyncOrchestrator] Order ${order.orderNumber}: ${currentStatus} -> ${newStatus}`);
 
             // Update local database
             await this.prisma.order.update({
               where: { id: order.id },
-              data: {
-                status: newStatus as any,
-                updatedAt: new Date(),
-              },
+              data: updateData,
             });
 
             result.statusesUpdated++;
@@ -1945,6 +2004,10 @@ export class SyncOrchestrator {
             // Push to channel if order is shipped/delivered
             if (newStatus === 'SHIPPED' || newStatus === 'DELIVERED') {
               try {
+                // Update Shopify fulfillment with tracking info
+                if (updateData.trackingNumber) {
+                  await this.updateShopifyFulfillmentForOrder(order.id, updateData.trackingNumber, updateData.trackingUrl);
+                }
                 await this.updateChannelOrderStatus(order.id, newStatus);
                 result.channelsPushed++;
                 console.log(`[SyncOrchestrator] Pushed status to channel for order ${order.orderNumber}`);
@@ -1969,6 +2032,66 @@ export class SyncOrchestrator {
     }
 
     return result;
+  }
+
+  /**
+   * Update Shopify fulfillment with tracking info when order is shipped
+   * This creates a fulfillment in Shopify with tracking number and URL
+   */
+  private async updateShopifyFulfillmentForOrder(
+    orderId: string,
+    trackingNumber: string,
+    trackingUrl?: string
+  ): Promise<void> {
+    // Get order with channel info
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      include: {
+        channel: true,
+      },
+    });
+
+    if (!order || !order.channelId || !order.externalOrderId) {
+      console.log(`[Shopify] Order ${orderId} not found or missing channel/external ID`);
+      return;
+    }
+
+    // Only process Shopify orders
+    if (order.channel?.type !== 'SHOPIFY') {
+      console.log(`[Shopify] Order ${orderId} is not a Shopify order, skipping fulfillment update`);
+      return;
+    }
+
+    // Check if we have a GraphQL service with fulfillment capability
+    if (!this.shopifyService) {
+      console.log(`[Shopify] No Shopify service available for order ${orderId}`);
+      return;
+    }
+
+    // Check if it's a GraphQL service (has createFulfillmentWithTracking method)
+    const { isGraphQLService } = await import('./shopify-service-factory.js');
+    if (!isGraphQLService(this.shopifyService)) {
+      console.log(`[Shopify] Shopify REST service doesn't support fulfillment creation with tracking`);
+      return;
+    }
+
+    try {
+      // Create fulfillment with tracking in Shopify
+      const result = await this.shopifyService.createFulfillmentWithTracking({
+        orderId: `gid://shopify/Order/${order.externalOrderId}`,
+        trackingNumber,
+        trackingUrl,
+        trackingCompany: 'DHL', // Default carrier - could be derived from JTL data
+      });
+
+      if (result.success) {
+        console.log(`[Shopify] Created fulfillment for order ${order.orderId} with tracking ${trackingNumber}`);
+      } else {
+        console.error(`[Shopify] Failed to create fulfillment for order ${order.orderId}: ${result.error}`);
+      }
+    } catch (error: any) {
+      console.error(`[Shopify] Error creating fulfillment for order ${order.orderId}:`, error.message);
+    }
   }
 
   /**

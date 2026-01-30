@@ -1520,37 +1520,86 @@ export class JTLService {
   }
 
   /**
-   * Get shipping notifications for an outbound
+   * Get shipping notifications for an outbound (includes tracking info)
+   * API: GET /api/v1/merchant/outbounds/{outboundId}/shipping-notifications
    *
    * @param outboundId - JTL FFN outbound ID
    */
   async getShippingNotifications(outboundId: string): Promise<{
     success: boolean;
-    data?: Array<{
-      trackingNumber: string;
-      carrierCode: string;
-      carrierName?: string;
-      shippedAt: string;
-      trackingUrl?: string;
-    }>;
+    data?: {
+      packages: Array<{
+        freightOption: string;
+        estimatedDeliveryDate?: string;
+        trackingUrl?: string;
+        identifier: Array<{
+          value: string;
+          identifierType: string;
+          name?: string;
+        }>;
+      }>;
+    };
     error?: string;
   }> {
     try {
       const response = await this.request<{
-        shippingNotifications: Array<{
-          trackingNumber: string;
-          carrierCode: string;
-          carrierName?: string;
-          shippedAt: string;
+        packages: Array<{
+          freightOption: string;
+          estimatedDeliveryDate?: string;
           trackingUrl?: string;
+          identifier: Array<{
+            value: string;
+            identifierType: string;
+            name?: string;
+          }>;
         }>;
       }>(`/v1/merchant/outbounds/${outboundId}/shipping-notifications`);
 
-      return { success: true, data: response.shippingNotifications || [] };
+      return { success: true, data: response };
     } catch (error: any) {
+      // 404 means no shipping notification yet (not shipped)
+      if (error.message?.includes('404') || error.message?.includes('Not Found')) {
+        return { success: true, data: { packages: [] } };
+      }
       console.error(`[JTL] Failed to get shipping notifications for ${outboundId}:`, error);
       return { success: false, error: error.message };
     }
+  }
+
+  /**
+   * Extract tracking info from shipping notifications response
+   * Returns the first tracking number and URL found
+   */
+  extractTrackingInfo(shippingNotifications: {
+    packages: Array<{
+      freightOption: string;
+      estimatedDeliveryDate?: string;
+      trackingUrl?: string;
+      identifier: Array<{
+        value: string;
+        identifierType: string;
+        name?: string;
+      }>;
+    }>;
+  }): {
+    trackingNumber?: string;
+    trackingUrl?: string;
+    carrier?: string;
+  } {
+    const firstPackage = shippingNotifications.packages?.[0];
+    if (!firstPackage) {
+      return {};
+    }
+
+    const trackingId = firstPackage.identifier?.find(
+      id => id.identifierType === 'TrackingId'
+    );
+
+    return {
+      trackingNumber: trackingId?.value,
+      trackingUrl: firstPackage.trackingUrl,
+      carrier: firstPackage.freightOption,
+    };
   }
 
   /**

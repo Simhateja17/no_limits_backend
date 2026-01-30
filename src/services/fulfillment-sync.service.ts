@@ -201,22 +201,27 @@ export class FulfillmentSyncService {
 
       const notifications = await jtlService.getShippingNotifications(order.jtlOutboundId);
 
-      if (!notifications.success || !notifications.data || notifications.data.length === 0) {
+      if (!notifications.success || !notifications.data || notifications.data.packages.length === 0) {
         result.errors.push('No tracking information available');
         return result;
       }
 
-      // Use the latest notification
-      const latest = notifications.data[notifications.data.length - 1];
+      // Extract tracking info from the shipping notification
+      const trackingInfo = jtlService.extractTrackingInfo(notifications.data);
+
+      if (!trackingInfo.trackingNumber) {
+        result.errors.push('No tracking number in shipping notification');
+        return result;
+      }
 
       // Update order with tracking info
       await this.prisma.order.update({
         where: { id: orderId },
         data: {
-          trackingNumber: latest.trackingNumber,
-          carrierSelection: latest.carrierName || latest.carrierCode,
-          trackingUrl: latest.trackingUrl || null,
-          shippedAt: new Date(latest.shippedAt),
+          trackingNumber: trackingInfo.trackingNumber,
+          carrierSelection: trackingInfo.carrier || null,
+          trackingUrl: trackingInfo.trackingUrl || null,
+          shippedAt: new Date(),
           fulfillmentState: 'SHIPPED',
           lastOperationalUpdateBy: 'JTL',
           lastOperationalUpdateAt: new Date(),

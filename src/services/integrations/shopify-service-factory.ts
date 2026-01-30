@@ -55,10 +55,17 @@ export function isRESTService(service: ShopifyServiceInstance): service is Shopi
 }
 
 /**
- * Environment variable to enable GraphQL globally
+ * Environment variable to control GraphQL usage
+ * GraphQL is now the DEFAULT because it has proper cursor-based pagination
+ * Set SHOPIFY_USE_REST=true to force REST API (not recommended for order sync)
  */
 export function shouldUseGraphQL(): boolean {
-  return process.env.SHOPIFY_USE_GRAPHQL === 'true';
+  // Default to GraphQL (true) unless explicitly disabled with SHOPIFY_USE_REST=true
+  // GraphQL has proper cursor-based pagination that REST lacks
+  if (process.env.SHOPIFY_USE_REST === 'true') {
+    return false;
+  }
+  return true; // Default to GraphQL for proper pagination
 }
 
 /**
