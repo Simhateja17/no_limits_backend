@@ -730,14 +730,17 @@ export class SyncOrchestrator {
           customerPhone: orderData.shippingAddress.phone,
           items: {
             create: await Promise.all(orderData.items.map(async (item) => {
-              // Find product by SKU
-              const product = await this.prisma.product.findFirst({
-                where: { sku: item.sku },
-              });
+              // Find product by SKU (only if SKU exists)
+              let product = null;
+              if (item.sku) {
+                product = await this.prisma.product.findFirst({
+                  where: { sku: item.sku },
+                });
+              }
 
               return {
                 productId: product?.id,
-                sku: item.sku,
+                sku: item.sku || `NO-SKU-${Date.now()}`, // Fallback for items without SKU
                 quantity: item.quantity,
                 productName: product?.name || 'Unknown Product',
               };
@@ -761,9 +764,13 @@ export class SyncOrchestrator {
     // Get JTL product IDs for order items
     const itemsWithJtlIds = await Promise.all(
       orderData.items.map(async (item) => {
-        const product = await this.prisma.product.findFirst({
-          where: { sku: item.sku },
-        });
+        // Skip product lookup if no SKU
+        let product = null;
+        if (item.sku) {
+          product = await this.prisma.product.findFirst({
+            where: { sku: item.sku },
+          });
+        }
 
         return {
           ...item,
@@ -951,7 +958,7 @@ export class SyncOrchestrator {
         externalReturnId: refundData.refundId,
         items: {
           create: refundData.items.map(item => ({
-            sku: item.sku,
+            sku: item.sku || `NO-SKU-${Date.now()}`, // Fallback for items without SKU
             quantity: item.quantity,
           })),
         },
@@ -962,9 +969,13 @@ export class SyncOrchestrator {
     // Map items with JTL IDs
     const itemsWithJtlIds = await Promise.all(
       refundData.items.map(async (item) => {
-        const product = await this.prisma.product.findFirst({
-          where: { sku: item.sku },
-        });
+        // Skip product lookup if no SKU
+        let product = null;
+        if (item.sku) {
+          product = await this.prisma.product.findFirst({
+            where: { sku: item.sku },
+          });
+        }
         return {
           ...item,
           jtlJfsku: product?.jtlProductId || undefined,
@@ -1439,6 +1450,98 @@ export class SyncOrchestrator {
       console.error('[Progress] Update failed:', error);
       // Don't fail sync if progress update fails
     }
+  }
+
+  // ============= CHANNEL-ONLY PULL (NO JTL) =============
+
+  /**
+   * Pull data from sales channel to local DB only (no JTL push)
+   * Used during initial sync pipeline Step 1 to avoid duplicate errors in JTL
+   *
+   * This method:
+   * - Pulls products, orders, and returns from Shopify/WooCommerce
+   * - Saves them to the local database
+   * - Does NOT push anything to JTL FFN
+   *
+   * @param since Optional date to limit sync to data created/updated since this date
+   */
+  async pullFromChannelOnly(since?: Date): Promise<{
+    products: { itemsProcessed: number; itemsFailed: number };
+    orders: { itemsProcessed: number; itemsFailed: number };
+    returns: { itemsProcessed: number; itemsFailed: number };
+  }> {
+    console.log(`[SyncOrchestrator] Pull from channel only (no JTL push) since ${since?.toISOString() || 'all'}`);
+
+    const results = {
+      products: { itemsProcessed: 0, itemsFailed: 0 },
+      orders: { itemsProcessed: 0, itemsFailed: 0 },
+      returns: { itemsProcessed: 0, itemsFailed: 0 },
+    };
+
+    // Verify channel exists
+    const channel = await this.prisma.channel.findUnique({
+      where: { id: this.config.channelId },
+      select: { id: true },
+    });
+    if (!channel) throw new Error('Channel not found');
+
+    // PHASE 1: Pull and store products (NO JTL push)
+    try {
+      const channelProducts = await this.pullProductsFromChannel(since);
+      console.log(`[SyncOrchestrator] Pulled ${channelProducts.length} products from channel`);
+
+      for (const product of channelProducts) {
+        try {
+          // upsertProductInDB already fetches clientId from channel internally
+          await this.upsertProductInDB(product);
+          results.products.itemsProcessed++;
+        } catch (error) {
+          console.error(`[SyncOrchestrator] Failed to save product ${product.sku}:`, error);
+          results.products.itemsFailed++;
+        }
+      }
+    } catch (error) {
+      console.error('[SyncOrchestrator] Failed to pull products:', error);
+    }
+
+    // PHASE 2: Pull and store orders (NO JTL push)
+    try {
+      const channelOrders = await this.pullOrdersFromChannel(since);
+      console.log(`[SyncOrchestrator] Pulled ${channelOrders.length} orders from channel`);
+
+      for (const order of channelOrders) {
+        try {
+          await this.upsertOrderInDB(order);
+          results.orders.itemsProcessed++;
+        } catch (error) {
+          console.error(`[SyncOrchestrator] Failed to save order ${order.orderNumber}:`, error);
+          results.orders.itemsFailed++;
+        }
+      }
+    } catch (error) {
+      console.error('[SyncOrchestrator] Failed to pull orders:', error);
+    }
+
+    // PHASE 3: Pull and store returns (NO JTL push)
+    try {
+      const channelReturns = await this.pullRefundsFromChannel(since);
+      console.log(`[SyncOrchestrator] Pulled ${channelReturns.length} returns from channel`);
+
+      for (const ret of channelReturns) {
+        try {
+          await this.createReturnInDB(ret);
+          results.returns.itemsProcessed++;
+        } catch (error) {
+          console.error(`[SyncOrchestrator] Failed to save return:`, error);
+          results.returns.itemsFailed++;
+        }
+      }
+    } catch (error) {
+      console.error('[SyncOrchestrator] Failed to pull returns:', error);
+    }
+
+    console.log(`[SyncOrchestrator] Pull from channel only complete:`, results);
+    return results;
   }
 
   // ============= FULL SYNC =============

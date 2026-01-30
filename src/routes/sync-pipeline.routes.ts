@@ -163,6 +163,30 @@ export default function createSyncPipelineRoutes(prisma: PrismaClient): Router {
   });
 
   /**
+   * POST /api/sync-pipeline/:pipelineId/cancel
+   * Cancel/stop a running pipeline completely and mark it as failed
+   */
+  router.post('/:pipelineId/cancel', async (req: Request, res: Response) => {
+    try {
+      const { pipelineId } = req.params;
+
+      const result = await pipelineService.cancelPipeline(pipelineId);
+
+      if (result.success) {
+        return res.json(result);
+      } else {
+        return res.status(400).json(result);
+      }
+    } catch (error) {
+      console.error('[SyncPipelineRoutes] Error cancelling pipeline:', error);
+      return res.status(500).json({
+        success: false,
+        error: error instanceof Error ? error.message : 'Internal server error',
+      });
+    }
+  });
+
+  /**
    * GET /api/sync-pipeline/client/:clientId/pipelines
    * Get all pipelines for a client
    */

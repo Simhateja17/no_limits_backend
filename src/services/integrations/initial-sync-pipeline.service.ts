@@ -68,11 +68,13 @@ export interface PipelineResult {
 }
 
 // Pipeline step definitions
+// Step 1 is UNIDIRECTIONAL: Channel → Local DB only (no JTL push)
+// Step 3 pushes to JTL with duplicate handling
 const PIPELINE_STEPS = [
   {
     stepNumber: 1,
     stepName: 'pull_channel_data',
-    stepDescription: 'Pulling products, orders, and returns from sales channel',
+    stepDescription: 'Pulling products, orders, and returns from sales channel to local database',
   },
   {
     stepNumber: 2,
@@ -82,7 +84,7 @@ const PIPELINE_STEPS = [
   {
     stepNumber: 3,
     stepName: 'push_products_to_jtl',
-    stepDescription: 'Pushing products from local database to JTL FFN',
+    stepDescription: 'Pushing products from local database to JTL FFN (with duplicate handling)',
   },
   {
     stepNumber: 4,
@@ -449,7 +451,11 @@ export class InitialSyncPipelineService {
   // ============= STEP IMPLEMENTATIONS =============
 
   /**
-   * Step 1: Pull data from sales channel (Shopify/WooCommerce)
+   * Step 1: Pull data from sales channel (Shopify/WooCommerce) to local DB ONLY
+   *
+   * IMPORTANT: This step is now UNIDIRECTIONAL (Channel → Local DB only)
+   * It does NOT push to JTL FFN to avoid duplicate product errors.
+   * JTL push happens in Step 3 with proper duplicate handling.
    */
   private async stepPullChannelData(pipeline: {
     channelId: string;
@@ -474,7 +480,7 @@ export class InitialSyncPipelineService {
       };
     };
   }): Promise<{ success: boolean; itemsProcessed?: number; itemsFailed?: number; error?: string }> {
-    console.log('[SyncPipeline] Step 1: Pulling channel data');
+    console.log('[SyncPipeline] Step 1: Pulling channel data (unidirectional - no JTL push)');
 
     const { channel, channelId, syncFromDate } = pipeline;
     const jtlConfig = channel.client.jtlConfig;
@@ -535,7 +541,9 @@ export class InitialSyncPipelineService {
     // Use syncFromDate if provided, otherwise default to 180 days
     const since = syncFromDate || new Date(Date.now() - 180 * 24 * 60 * 60 * 1000);
 
-    const result = await orchestrator.runFullSync(since);
+    // Use pullFromChannelOnly instead of runFullSync to avoid JTL push
+    // This prevents Products_DuplicateProduct errors during initial sync
+    const result = await orchestrator.pullFromChannelOnly(since);
 
     const totalProcessed =
       result.products.itemsProcessed +
@@ -546,6 +554,8 @@ export class InitialSyncPipelineService {
       result.products.itemsFailed +
       result.orders.itemsFailed +
       result.returns.itemsFailed;
+
+    console.log(`[SyncPipeline] Step 1 complete: ${totalProcessed} items processed, ${totalFailed} failed`);
 
     return {
       success: totalFailed === 0,
@@ -575,19 +585,35 @@ export class InitialSyncPipelineService {
   }
 
   /**
-   * Step 3: Push products to JTL FFN
+   * Step 3: Push products to JTL FFN ONLY
+   *
+   * IMPORTANT: This step pushes ONLY to JTL FFN (not to Shopify/WooCommerce)
+   * - Skips products already linked to JTL (have jtlProductId)
+   * - Skips products with generated SKUs (SHOP-xxx, WOO-xxx) - they need manual linking
+   * - Only creates new products in JTL for products that don't exist there
+   * - Handles JTL duplicate errors by auto-fixing (extracts JFSKU and links)
    */
   private async stepPushProductsToJTL(pipeline: {
     clientId: string;
   }): Promise<{ success: boolean; itemsProcessed?: number; itemsFailed?: number; error?: string }> {
-    console.log('[SyncPipeline] Step 3: Pushing products to JTL');
+    console.log('[SyncPipeline] Step 3: Pushing products to JTL (JTL-only, skipping Shopify/WooCommerce)');
 
     const productSyncService = new ProductSyncService(this.prisma);
-    const result = await productSyncService.fullSyncForClient(pipeline.clientId);
+    const result = await productSyncService.pushToJTLOnly(pipeline.clientId);
+
+    console.log(`[SyncPipeline] Step 3 complete:`);
+    console.log(`[SyncPipeline]   - ${result.synced} synced to JTL`);
+    console.log(`[SyncPipeline]   - ${result.skipped} skipped (already linked)`);
+    console.log(`[SyncPipeline]   - ${result.skippedManualLink} skipped - have generated SKUs and need manual linking`);
+    console.log(`[SyncPipeline]   - ${result.failed} failed`);
+
+    if (result.skippedManualLink > 0) {
+      console.log(`[SyncPipeline] ⚠️ ${result.skippedManualLink} products have generated SKUs (SHOP-xxx/WOO-xxx) and need manual linking in the Products table`);
+    }
 
     return {
       success: result.failed === 0,
-      itemsProcessed: result.synced,
+      itemsProcessed: result.synced + result.skipped + result.skippedManualLink,
       itemsFailed: result.failed,
       error: result.errors.length > 0 ? result.errors.join('; ') : undefined,
     };
@@ -872,6 +898,59 @@ export class InitialSyncPipelineService {
         success: false,
         pipelineId,
         error: error instanceof Error ? error.message : 'Failed to retry pipeline',
+      };
+    }
+  }
+
+  /**
+   * Cancel a running pipeline completely
+   * Marks it as FAILED so user can restart fresh
+   */
+  async cancelPipeline(pipelineId: string): Promise<PipelineResult> {
+    try {
+      const pipeline = await this.prisma.syncPipeline.findUnique({
+        where: { id: pipelineId },
+      });
+
+      if (!pipeline) {
+        return { success: false, pipelineId, error: 'Pipeline not found' };
+      }
+
+      if (pipeline.status !== 'IN_PROGRESS' && pipeline.status !== 'PAUSED' && pipeline.status !== 'PENDING') {
+        return { success: false, pipelineId, error: 'Pipeline is not running or paused' };
+      }
+
+      // Update pipeline to FAILED status
+      await this.prisma.syncPipeline.update({
+        where: { id: pipelineId },
+        data: {
+          status: 'FAILED',
+          lastError: 'Pipeline cancelled by user',
+          completedAt: new Date(),
+        },
+      });
+
+      // Mark any in-progress steps as failed
+      await this.prisma.pipelineStep.updateMany({
+        where: {
+          pipelineId,
+          status: 'IN_PROGRESS',
+        },
+        data: {
+          status: 'FAILED',
+          errorMessage: 'Cancelled by user',
+          completedAt: new Date(),
+        },
+      });
+
+      console.log(`[SyncPipeline] Pipeline ${pipelineId} cancelled by user`);
+
+      return { success: true, pipelineId, message: 'Pipeline cancelled' };
+    } catch (error) {
+      return {
+        success: false,
+        pipelineId,
+        error: error instanceof Error ? error.message : 'Failed to cancel pipeline',
       };
     }
   }

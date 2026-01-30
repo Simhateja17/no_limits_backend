@@ -3108,5 +3108,207 @@ router.get('/test/shopify/:channelId', authenticate, async (req: Request, res: R
   }
 });
 
+// ============= MANUAL JTL FFN PRODUCT LINKING =============
+// For migration clients who have existing products in JTL FFN
+
+/**
+ * Get JTL FFN products that are NOT linked to any local product
+ * Used in manual linking UI for migration clients
+ */
+router.get('/jtl/unlinked-products/:clientId', authenticate, async (req: Request, res: Response) => {
+  try {
+    const { clientId } = req.params;
+
+    // Verify client exists
+    const client = await prisma.client.findUnique({
+      where: { id: clientId },
+    });
+
+    if (!client) {
+      return res.status(404).json({
+        success: false,
+        error: 'Client not found',
+      });
+    }
+
+    // Get JTL config for the client
+    const jtlConfig = await prisma.jtlConfig.findUnique({
+      where: { clientId_fk: clientId },
+    });
+
+    if (!jtlConfig || !jtlConfig.accessToken) {
+      return res.status(400).json({
+        success: false,
+        error: 'Client does not have JTL credentials configured or OAuth not completed',
+      });
+    }
+
+    // Initialize JTL service with proper credentials
+    const encryptionService = getEncryptionService();
+    const jtlService = new JTLService(
+      {
+        clientId: jtlConfig.clientId,
+        clientSecret: encryptionService.decrypt(jtlConfig.clientSecret),
+        accessToken: encryptionService.decrypt(jtlConfig.accessToken),
+        refreshToken: jtlConfig.refreshToken ? encryptionService.decrypt(jtlConfig.refreshToken) : undefined,
+        tokenExpiresAt: jtlConfig.tokenExpiresAt || undefined,
+        environment: jtlConfig.environment as 'sandbox' | 'production',
+      },
+      prisma,
+      clientId
+    );
+
+    // Get all products from JTL FFN
+    console.log(`[JTL Link] Fetching all products from JTL FFN for client ${clientId}`);
+    const jtlProducts = await jtlService.getAllProductsWithStock();
+
+    // Get all local products that are already linked to JTL (have jtlProductId)
+    const linkedProducts = await prisma.product.findMany({
+      where: {
+        clientId,
+        jtlProductId: { not: null },
+      },
+      select: { jtlProductId: true },
+    });
+
+    const linkedJfsKus = new Set(linkedProducts.map(p => p.jtlProductId));
+
+    // Filter JTL products to only show those NOT linked to any local product
+    const unlinkedJtlProducts = jtlProducts.filter(jp => !linkedJfsKus.has(jp.jfsku));
+
+    console.log(`[JTL Link] Found ${jtlProducts.length} total JTL products, ${unlinkedJtlProducts.length} are unlinked`);
+
+    // Return formatted list for the UI
+    res.json({
+      success: true,
+      data: {
+        total: jtlProducts.length,
+        linked: linkedProducts.length,
+        unlinked: unlinkedJtlProducts.length,
+        products: unlinkedJtlProducts.map(jp => ({
+          jfsku: jp.jfsku,
+          merchantSku: jp.merchantSku,
+          name: jp.name,
+          description: null, // JTLProductWithStock doesn't have description
+          stockLevel: jp.stock?.stockLevel || 0,
+          ean: null, // JTLProductWithStock doesn't have EAN
+        })),
+      },
+    });
+  } catch (error) {
+    console.error('[JTL Link] Error fetching unlinked JTL products:', error);
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+});
+
+/**
+ * Link a local product to an existing JTL FFN product
+ * Used for manual linking of products with generated SKUs (SHOP-xxx, WOO-xxx)
+ */
+router.post('/products/:productId/link-jtl', authenticate, async (req: Request, res: Response) => {
+  try {
+    const { productId } = req.params;
+    const { jtlProductId } = req.body; // This is the jfsku from JTL FFN
+
+    if (!jtlProductId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required field: jtlProductId (jfsku)',
+      });
+    }
+
+    // Find the local product
+    const product = await prisma.product.findUnique({
+      where: { id: productId },
+      include: { client: true },
+    });
+
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        error: 'Product not found',
+      });
+    }
+
+    // Check if product is already linked
+    if (product.jtlProductId) {
+      return res.status(400).json({
+        success: false,
+        error: `Product is already linked to JTL product: ${product.jtlProductId}`,
+      });
+    }
+
+    // Optionally verify the JTL product exists
+    const jtlConfig = await prisma.jtlConfig.findUnique({
+      where: { clientId_fk: product.clientId },
+    });
+
+    if (jtlConfig && jtlConfig.accessToken) {
+      try {
+        const encryptionService = getEncryptionService();
+        const jtlService = new JTLService(
+          {
+            clientId: jtlConfig.clientId,
+            clientSecret: encryptionService.decrypt(jtlConfig.clientSecret),
+            accessToken: encryptionService.decrypt(jtlConfig.accessToken),
+            refreshToken: jtlConfig.refreshToken ? encryptionService.decrypt(jtlConfig.refreshToken) : undefined,
+            tokenExpiresAt: jtlConfig.tokenExpiresAt || undefined,
+            environment: jtlConfig.environment as 'sandbox' | 'production',
+          },
+          prisma,
+          product.clientId
+        );
+
+        // Try to get the product from JTL to verify it exists
+        const jtlProduct = await jtlService.getProduct(jtlProductId);
+        if (!jtlProduct) {
+          return res.status(400).json({
+            success: false,
+            error: `JTL product with jfsku "${jtlProductId}" not found in JTL FFN`,
+          });
+        }
+
+        console.log(`[JTL Link] Verified JTL product exists: ${jtlProductId} (${jtlProduct.name})`);
+      } catch (verifyError) {
+        console.warn(`[JTL Link] Could not verify JTL product (proceeding anyway):`, verifyError);
+        // Continue with linking even if verification fails
+      }
+    }
+
+    // Update the local product with the JTL link
+    const updatedProduct = await prisma.product.update({
+      where: { id: productId },
+      data: {
+        jtlProductId,
+        jtlSyncStatus: 'SYNCED',
+        lastJtlSync: new Date(),
+      },
+    });
+
+    console.log(`[JTL Link] Successfully linked product ${product.sku} to JTL product ${jtlProductId}`);
+
+    res.json({
+      success: true,
+      message: `Product "${product.name}" linked to JTL product ${jtlProductId}`,
+      data: {
+        productId: updatedProduct.id,
+        sku: updatedProduct.sku,
+        name: updatedProduct.name,
+        jtlProductId: updatedProduct.jtlProductId,
+        jtlSyncStatus: updatedProduct.jtlSyncStatus,
+      },
+    });
+  } catch (error) {
+    console.error('[JTL Link] Error linking product to JTL:', error);
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+});
+
 export default router;
 

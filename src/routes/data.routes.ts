@@ -59,6 +59,7 @@ router.get('/products', async (req: Request, res: Response) => {
         jtlProductId: true,
         jtlSyncStatus: true,
         lastJtlSync: true,
+        clientId: true,
         client: {
           select: {
             companyName: true,

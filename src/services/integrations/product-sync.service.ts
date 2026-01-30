@@ -1699,6 +1699,124 @@ export class ProductSyncService {
     };
   }
 
+  // ============= GENERATED SKU DETECTION =============
+
+  /**
+   * Patterns that indicate a generated/placeholder SKU
+   * These products need manual linking to existing JTL FFN products
+   */
+  private static GENERATED_SKU_PATTERNS = ['SHOP-', 'WOO-'];
+
+  /**
+   * Check if a SKU is a generated placeholder (SHOP-xxx or WOO-xxx)
+   * Products with generated SKUs should NOT be auto-pushed to JTL FFN
+   * as they likely need to be manually linked to existing JTL products
+   */
+  private isGeneratedSku(sku: string): boolean {
+    return ProductSyncService.GENERATED_SKU_PATTERNS.some(pattern => sku.startsWith(pattern));
+  }
+
+  /**
+   * Push products to JTL FFN ONLY (skip Shopify/WooCommerce)
+   * Used during initial sync pipeline Step 3 to avoid Shopify 404 errors
+   *
+   * Only pushes products that:
+   * 1. Don't have jtlProductId set (not already linked)
+   * 2. Have real SKUs (not generated SHOP-xxx or WOO-xxx)
+   *
+   * Products with generated SKUs are skipped - they need manual linking
+   */
+  async pushToJTLOnly(clientId: string): Promise<{
+    totalProducts: number;
+    synced: number;
+    skipped: number;
+    skippedManualLink: number;
+    failed: number;
+    errors: string[];
+  }> {
+    console.log(`[ProductSync] Pushing products to JTL ONLY for client ${clientId} (skipping Shopify/WooCommerce)`);
+
+    // Get products that aren't linked to JTL yet
+    const allUnlinkedProducts = await this.prisma.product.findMany({
+      where: {
+        clientId,
+        isActive: true,
+        jtlProductId: null, // Only products not yet linked to JTL
+      },
+      select: { id: true, sku: true },
+    });
+
+    // Separate products with real SKUs from those with generated SKUs
+    const productsToSync = allUnlinkedProducts.filter(p => !this.isGeneratedSku(p.sku));
+    const productsNeedingManualLink = allUnlinkedProducts.filter(p => this.isGeneratedSku(p.sku));
+
+    // Also count already linked products
+    const linkedCount = await this.prisma.product.count({
+      where: {
+        clientId,
+        isActive: true,
+        jtlProductId: { not: null },
+      },
+    });
+
+    console.log(`[ProductSync] Found ${allUnlinkedProducts.length} unlinked products:`);
+    console.log(`[ProductSync]   - ${productsToSync.length} with real SKUs → will push to JTL`);
+    console.log(`[ProductSync]   - ${productsNeedingManualLink.length} with generated SKUs (SHOP-xxx/WOO-xxx) → need manual linking`);
+    console.log(`[ProductSync]   - ${linkedCount} already linked to JTL`);
+
+    // Log which products need manual linking for visibility
+    if (productsNeedingManualLink.length > 0) {
+      console.log(`[ProductSync] ⚠️ Products needing manual linking:`);
+      productsNeedingManualLink.slice(0, 10).forEach(p => {
+        console.log(`[ProductSync]   - ${p.sku}`);
+      });
+      if (productsNeedingManualLink.length > 10) {
+        console.log(`[ProductSync]   ... and ${productsNeedingManualLink.length - 10} more`);
+      }
+    }
+
+    // Use filtered products list (only real SKUs)
+    const products = productsToSync;
+
+    let synced = 0;
+    let failed = 0;
+    const errors: string[] = [];
+
+    for (const product of products) {
+      // Push ONLY to JTL (skip Shopify and WooCommerce)
+      const result = await this.pushProductToAllPlatforms(
+        product.id,
+        'system',
+        { skipPlatforms: ['shopify', 'woocommerce'] }
+      );
+
+      if (result.success) {
+        synced++;
+        console.log(`[ProductSync] ✅ Pushed ${product.sku} to JTL`);
+      } else {
+        failed++;
+        if (result.error) {
+          errors.push(`${product.sku}: ${result.error}`);
+          console.log(`[ProductSync] ❌ Failed to push ${product.sku}: ${result.error}`);
+        }
+      }
+
+      // Rate limiting
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+
+    console.log(`[ProductSync] JTL-only push complete: ${synced} synced, ${failed} failed, ${linkedCount} skipped (already linked), ${productsNeedingManualLink.length} need manual linking`);
+
+    return {
+      totalProducts: allUnlinkedProducts.length + linkedCount,
+      synced,
+      skipped: linkedCount,
+      skippedManualLink: productsNeedingManualLink.length,
+      failed,
+      errors,
+    };
+  }
+
   /**
    * Pull products FROM JTL FFN and update local database with jtlProductId
    * This resolves "duplicate product" errors by syncing JTL's existing products back to local DB
@@ -1860,22 +1978,97 @@ export class ProductSyncService {
       result.totalJtlProducts = jtlProducts.length;
       console.log(`[ProductSync] Found ${jtlProducts.length} products in JTL FFN`);
 
-      // Get all existing local products for this client (by SKU)
+      // Get all existing local products for this client (including name and id for matching)
       const localProducts = await this.prisma.product.findMany({
         where: { clientId },
-        select: { sku: true },
+        select: { id: true, sku: true, name: true, jtlProductId: true },
       });
       const existingSkus = new Set(localProducts.map(p => p.sku));
 
-      // Import products that don't exist locally
+      // Create a map of normalized names to products for matching
+      // This helps link products pulled from Shopify (with SHOP-xxx SKUs) to JTL products
+      const normalizeProductName = (name: string): string => {
+        return name.toLowerCase().trim()
+          .replace(/\s+/g, ' ')           // normalize whitespace
+          .replace(/[^\w\s-]/g, '')       // remove special chars except hyphen
+          .replace(/\s*-\s*default\s*title$/i, ''); // remove " - Default Title" suffix
+      };
+
+      const productsByNormalizedName = new Map<string, typeof localProducts[0]>();
+      for (const product of localProducts) {
+        // Only consider products that don't have JTL link yet AND have generated SKUs
+        if (!product.jtlProductId && (product.sku.startsWith('SHOP-') || product.sku.startsWith('WOO-'))) {
+          const normalizedName = normalizeProductName(product.name);
+          productsByNormalizedName.set(normalizedName, product);
+        }
+      }
+
+      let linked = 0;
+
+      // Import products that don't exist locally OR link existing products by name
       for (const jtlProduct of jtlProducts) {
         const sku = jtlProduct.merchantSku;
+        const jtlProductName = jtlProduct.name || `Product ${sku}`;
 
+        // Case 1: SKU already exists in local DB - just update JTL link if missing
         if (existingSkus.has(sku)) {
+          const existingProduct = localProducts.find(p => p.sku === sku);
+          if (existingProduct && !existingProduct.jtlProductId) {
+            // Link existing product to JTL
+            await this.prisma.product.update({
+              where: { id: existingProduct.id },
+              data: {
+                jtlProductId: jtlProduct.jfsku,
+                jtlSyncStatus: 'SYNCED',
+                lastJtlSync: new Date(),
+                available: jtlProduct.stock?.stockLevel || 0,
+                reserved: jtlProduct.stock?.stockLevelReserved || 0,
+                announced: jtlProduct.stock?.stockLevelAnnounced || 0,
+              },
+            });
+            console.log(`[ProductSync] Linked existing product by SKU: ${sku} → ${jtlProduct.jfsku}`);
+            linked++;
+          }
           result.alreadyExists++;
           continue;
         }
 
+        // Case 2: Try to find a match by name (for products with SHOP-xxx/WOO-xxx SKUs)
+        const normalizedJtlName = normalizeProductName(jtlProductName);
+        const matchedProduct = productsByNormalizedName.get(normalizedJtlName);
+
+        if (matchedProduct) {
+          try {
+            // Update the existing product: fix SKU and link to JTL
+            console.log(`[ProductSync] Found name match: "${matchedProduct.name}" (${matchedProduct.sku}) ↔ JTL "${jtlProductName}" (${sku})`);
+
+            await this.prisma.product.update({
+              where: { id: matchedProduct.id },
+              data: {
+                sku: sku,  // Update to correct JTL merchantSku
+                jtlProductId: jtlProduct.jfsku,
+                jtlSyncStatus: 'SYNCED',
+                lastJtlSync: new Date(),
+                available: jtlProduct.stock?.stockLevel || 0,
+                reserved: jtlProduct.stock?.stockLevelReserved || 0,
+                announced: jtlProduct.stock?.stockLevelAnnounced || 0,
+              },
+            });
+
+            // Remove from map so we don't match again
+            productsByNormalizedName.delete(normalizedJtlName);
+            existingSkus.add(sku);  // Add new SKU to prevent creating duplicate
+
+            linked++;
+            console.log(`[ProductSync] ✅ Linked by name: ${matchedProduct.sku} → ${sku} (JTL: ${jtlProduct.jfsku})`);
+            continue;
+          } catch (error) {
+            console.error(`[ProductSync] Failed to link ${matchedProduct.sku}: ${error}`);
+            // Fall through to create new product
+          }
+        }
+
+        // Case 3: No match found - create new product
         try {
           // Create new product in local DB (NO channel sync)
           const newProduct = await this.prisma.product.create({
@@ -1883,7 +2076,7 @@ export class ProductSyncService {
               clientId,
               productId: `JTL-${jtlProduct.jfsku}`,
               sku: sku,
-              name: jtlProduct.name || `Product ${sku}`,
+              name: jtlProductName,
               available: jtlProduct.stock?.stockLevel || 0,
               reserved: jtlProduct.stock?.stockLevelReserved || 0,
               announced: jtlProduct.stock?.stockLevelAnnounced || 0,
@@ -1900,11 +2093,11 @@ export class ProductSyncService {
           result.imported++;
           result.importedProducts.push({
             sku: sku,
-            name: jtlProduct.name || `Product ${sku}`,
+            name: jtlProductName,
             jfsku: jtlProduct.jfsku,
           });
 
-          console.log(`[ProductSync] Imported product: ${sku} (${jtlProduct.jfsku})`);
+          console.log(`[ProductSync] Imported new product: ${sku} (${jtlProduct.jfsku})`);
         } catch (error) {
           result.failed++;
           const errorMsg = `Failed to import ${sku}: ${error instanceof Error ? error.message : 'Unknown error'}`;
@@ -1912,6 +2105,8 @@ export class ProductSyncService {
           console.error(`[ProductSync] ${errorMsg}`);
         }
       }
+
+      console.log(`[ProductSync] Linked ${linked} existing products to JTL by name matching`);
 
       console.log(`[ProductSync] Import complete: ${result.imported} imported, ${result.alreadyExists} already exist, ${result.failed} failed`);
       return result;
