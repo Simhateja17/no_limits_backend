@@ -214,6 +214,8 @@ export class FulfillmentSyncService {
         return result;
       }
 
+      console.log(`[FulfillmentSync] Extracted tracking for order ${orderId}: ${trackingInfo.trackingNumber} (carrier: ${trackingInfo.carrier})`);
+
       // Update order with tracking info
       await this.prisma.order.update({
         where: { id: orderId },

@@ -1542,20 +1542,23 @@ export class JTLService {
     error?: string;
   }> {
     try {
-      const response = await this.request<{
-        packages: Array<{
-          freightOption: string;
-          estimatedDeliveryDate?: string;
-          trackingUrl?: string;
-          identifier: Array<{
-            value: string;
-            identifierType: string;
-            name?: string;
-          }>;
+      // JTL API returns an array directly, not wrapped in { packages: [...] }
+      const response = await this.request<Array<{
+        freightOption: string;
+        estimatedDeliveryDate?: string;
+        trackingUrl?: string;
+        identifier: Array<{
+          value: string;
+          identifierType: string;
+          name?: string;
         }>;
-      }>(`/v1/merchant/outbounds/${outboundId}/shipping-notifications`);
+      }>>(`/v1/merchant/outbounds/${outboundId}/shipping-notifications`);
 
-      return { success: true, data: response };
+      // Wrap the array response to match our expected structure
+      const packages = Array.isArray(response) ? response : [];
+      console.log(`[JTL] Shipping notifications for ${outboundId}: ${packages.length} packages`);
+
+      return { success: true, data: { packages } };
     } catch (error: any) {
       // 404 means no shipping notification yet (not shipped)
       if (error.message?.includes('404') || error.message?.includes('Not Found')) {
@@ -1588,18 +1591,24 @@ export class JTLService {
   } {
     const firstPackage = shippingNotifications.packages?.[0];
     if (!firstPackage) {
+      console.log(`[JTL] extractTrackingInfo: No packages found`);
       return {};
     }
+
+    console.log(`[JTL] extractTrackingInfo: Package found with identifiers:`, firstPackage.identifier);
 
     const trackingId = firstPackage.identifier?.find(
       id => id.identifierType === 'TrackingId'
     );
 
-    return {
+    const result = {
       trackingNumber: trackingId?.value,
       trackingUrl: firstPackage.trackingUrl,
       carrier: firstPackage.freightOption,
     };
+
+    console.log(`[JTL] extractTrackingInfo result:`, result);
+    return result;
   }
 
   /**

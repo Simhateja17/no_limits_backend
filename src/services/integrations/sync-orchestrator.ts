@@ -1159,8 +1159,9 @@ export class SyncOrchestrator {
                   if (trackingInfo.trackingNumber) {
                     updateData.trackingNumber = trackingInfo.trackingNumber;
                     updateData.trackingUrl = trackingInfo.trackingUrl;
+                    updateData.carrierSelection = trackingInfo.carrier || null;
                     updateData.shippedAt = new Date();
-                    console.log(`[JTL] Updated tracking for order ${matchedOrder.orderId}: ${trackingInfo.trackingNumber}`);
+                    console.log(`[JTL] Updated tracking for order ${matchedOrder.orderId}: ${trackingInfo.trackingNumber} (carrier: ${trackingInfo.carrier})`);
                   }
                 }
               } catch (trackingError) {
@@ -1980,8 +1981,9 @@ export class SyncOrchestrator {
                 if (trackingInfo.trackingNumber) {
                   updateData.trackingNumber = trackingInfo.trackingNumber;
                   updateData.trackingUrl = trackingInfo.trackingUrl;
+                  updateData.carrierSelection = trackingInfo.carrier || null;
                   updateData.shippedAt = updateData.shippedAt || new Date();
-                  console.log(`[SyncOrchestrator] Fetched tracking for order ${order.orderNumber}: ${trackingInfo.trackingNumber}`);
+                  console.log(`[SyncOrchestrator] Fetched tracking for order ${order.orderNumber}: ${trackingInfo.trackingNumber} (carrier: ${trackingInfo.carrier})`);
                 }
               }
             } catch (trackingError) {
@@ -2076,21 +2078,51 @@ export class SyncOrchestrator {
     }
 
     try {
+      // Get carrier from order (populated from JTL freightOption) or default to DHL
+      const carrier = order.carrierSelection || 'DHL';
+
+      console.log(`[Shopify] Creating fulfillment for order ${order.orderId} (${order.externalOrderId}) with tracking ${trackingNumber}, carrier: ${carrier}`);
+
       // Create fulfillment with tracking in Shopify
       const result = await this.shopifyService.createFulfillmentWithTracking({
         orderId: `gid://shopify/Order/${order.externalOrderId}`,
         trackingNumber,
         trackingUrl,
-        trackingCompany: 'DHL', // Default carrier - could be derived from JTL data
+        trackingCompany: carrier,
       });
 
       if (result.success) {
-        console.log(`[Shopify] Created fulfillment for order ${order.orderId} with tracking ${trackingNumber}`);
+        console.log(`[Shopify] ✅ Created fulfillment for order ${order.orderId} with tracking ${trackingNumber}`);
+
+        // Update order to mark it as synced to commerce
+        await this.prisma.order.update({
+          where: { id: orderId },
+          data: {
+            lastSyncedToCommerce: new Date(),
+            commerceSyncError: null,
+          },
+        });
       } else {
-        console.error(`[Shopify] Failed to create fulfillment for order ${order.orderId}: ${result.error}`);
+        console.error(`[Shopify] ❌ Failed to create fulfillment for order ${order.orderId}: ${result.error}`);
+
+        // Store error for debugging
+        await this.prisma.order.update({
+          where: { id: orderId },
+          data: {
+            commerceSyncError: result.error || 'Unknown error',
+          },
+        });
       }
     } catch (error: any) {
-      console.error(`[Shopify] Error creating fulfillment for order ${order.orderId}:`, error.message);
+      console.error(`[Shopify] ❌ Error creating fulfillment for order ${order.orderId}:`, error.message);
+
+      // Store error for debugging
+      await this.prisma.order.update({
+        where: { id: orderId },
+        data: {
+          commerceSyncError: error.message,
+        },
+      });
     }
   }
 
