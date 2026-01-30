@@ -1702,7 +1702,7 @@ export class JTLService {
   /**
    * Sync order to JTL-FFN (create outbound)
    * Wrapper method for OrderSyncService
-   * 
+   *
    * @param orderId - The order ID to sync
    * @param prisma - PrismaClient instance for database access
    * @returns The created outbound ID
@@ -1711,6 +1711,7 @@ export class JTLService {
     success: boolean;
     outboundId?: string;
     error?: string;
+    alreadyExisted?: boolean;
   }> {
     try {
       const order = await prisma.order.findUnique({
@@ -1731,11 +1732,47 @@ export class JTLService {
         return { success: true };
       }
 
-      // Check if already synced
+      // Check if already synced locally
       if (order.jtlOutboundId) {
         console.log(`[JTL] Order ${orderId} already synced as outbound ${order.jtlOutboundId}`);
         return { success: true, outboundId: order.jtlOutboundId };
       }
+
+      // Check if order already exists in FFN (by querying FFN directly)
+      console.log(`[JTL-FFN-SYNC] Checking if order ${orderId} exists in FFN...`);
+      const existingOutbound = await this.getOutboundByMerchantNumber(order.orderId);
+      if (existingOutbound) {
+        // Order exists in FFN but not in our DB - sync the ID back
+        console.log(`[JTL-FFN-SYNC] Order already exists in FFN as outbound ${existingOutbound.outboundId} - syncing ID back`);
+        await prisma.order.update({
+          where: { id: orderId },
+          data: {
+            jtlOutboundId: existingOutbound.outboundId,
+            lastJtlSync: new Date(),
+            syncStatus: 'SYNCED',
+          },
+        });
+
+        // Log the sync
+        await prisma.orderSyncLog.create({
+          data: {
+            orderId,
+            action: 'update',
+            origin: 'NOLIMITS',
+            targetPlatform: 'jtl',
+            success: true,
+            externalId: existingOutbound.outboundId,
+            changedFields: ['jtlOutboundId', 'lastJtlSync'],
+          },
+        });
+
+        return {
+          success: true,
+          outboundId: existingOutbound.outboundId,
+          alreadyExisted: true,
+        };
+      }
+      console.log(`[JTL-FFN-SYNC] Order not in FFN, creating new outbound...`);
 
       // Transform order to JTL outbound format
       const outbound = this.transformOrderToOutbound(order);

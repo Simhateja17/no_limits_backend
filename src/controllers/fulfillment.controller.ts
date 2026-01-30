@@ -1185,9 +1185,12 @@ export const syncOrderToJTL = async (req: Request, res: Response): Promise<void>
     if (result.success) {
       res.json({
         success: true,
-        message: 'Order synced to JTL FFN',
+        message: result.alreadyExisted
+          ? 'Order already exists in JTL FFN - synced ID back to database'
+          : 'Order synced to JTL FFN',
         data: {
           outboundId: result.outboundId,
+          alreadyExisted: result.alreadyExisted || false,
         },
       });
     } else {
