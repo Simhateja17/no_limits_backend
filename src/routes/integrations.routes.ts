@@ -3310,5 +3310,339 @@ router.post('/products/:productId/link-jtl', authenticate, async (req: Request, 
   }
 });
 
+// ============= FETCH ALL (NO DATE FILTER) =============
+
+/**
+ * Fetch ALL products from a channel without date filter
+ * Useful for migration clients or when date-based sync misses products
+ */
+router.post('/channel/:channelId/fetch-all-products', authenticate, async (req: Request, res: Response) => {
+  try {
+    const { channelId } = req.params;
+
+    // Get channel with credentials and client info
+    const channel = await prisma.channel.findUnique({
+      where: { id: channelId },
+      include: {
+        client: {
+          include: {
+            jtlConfig: true,
+          },
+        },
+      },
+    });
+
+    if (!channel) {
+      return res.status(404).json({
+        success: false,
+        error: 'Channel not found',
+      });
+    }
+
+    const jtlConfig = channel.client?.jtlConfig;
+    if (!jtlConfig) {
+      return res.status(400).json({
+        success: false,
+        error: 'JTL configuration not found for client',
+      });
+    }
+
+    const encryptionService = getEncryptionService();
+
+    // Build orchestrator config
+    const orchestratorConfig: {
+      channelType: 'SHOPIFY' | 'WOOCOMMERCE';
+      channelId: string;
+      shopifyCredentials?: { shopDomain: string; accessToken: string };
+      wooCommerceCredentials?: { url: string; consumerKey: string; consumerSecret: string };
+      jtlCredentials: {
+        clientId: string;
+        clientSecret: string;
+        accessToken?: string;
+        refreshToken?: string;
+        environment: 'sandbox' | 'production';
+      };
+      jtlWarehouseId: string;
+      jtlFulfillerId: string;
+    } = {
+      channelType: channel.type as 'SHOPIFY' | 'WOOCOMMERCE',
+      channelId: channel.id,
+      jtlCredentials: {
+        clientId: jtlConfig.clientId,
+        clientSecret: encryptionService.safeDecrypt(jtlConfig.clientSecret),
+        accessToken: encryptionService.safeDecrypt(jtlConfig.accessToken) || undefined,
+        refreshToken: jtlConfig.refreshToken ? encryptionService.safeDecrypt(jtlConfig.refreshToken) : undefined,
+        environment: jtlConfig.environment as 'sandbox' | 'production',
+      },
+      jtlWarehouseId: jtlConfig.warehouseId,
+      jtlFulfillerId: jtlConfig.fulfillerId,
+    };
+
+    // Add channel-specific credentials
+    if (channel.type === 'SHOPIFY' && channel.shopDomain && channel.accessToken) {
+      orchestratorConfig.shopifyCredentials = {
+        shopDomain: channel.shopDomain,
+        accessToken: encryptionService.safeDecrypt(channel.accessToken),
+      };
+    } else if (channel.type === 'WOOCOMMERCE' && channel.apiUrl && channel.apiClientId && channel.apiClientSecret) {
+      orchestratorConfig.wooCommerceCredentials = {
+        url: channel.apiUrl,
+        consumerKey: channel.apiClientId,
+        consumerSecret: encryptionService.safeDecrypt(channel.apiClientSecret),
+      };
+    } else {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid channel credentials',
+      });
+    }
+
+    const { SyncOrchestrator } = await import('../services/integrations/sync-orchestrator.js');
+    const orchestrator = new SyncOrchestrator(prisma, orchestratorConfig);
+
+    console.log(`[FetchAll] Fetching ALL products for channel ${channelId} (no date filter)`);
+
+    // Pull from channel only (no JTL push) with undefined since = fetch ALL
+    const result = await orchestrator.pullFromChannelOnly(undefined);
+
+    res.json({
+      success: true,
+      message: `Fetched ${result.products.itemsProcessed} products (${result.products.itemsFailed} failed)`,
+      data: {
+        products: result.products,
+      },
+    });
+  } catch (error) {
+    console.error('[FetchAll] Error fetching all products:', error);
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+});
+
+/**
+ * Fetch ALL orders from a channel without date filter
+ * Useful for migration clients or when date-based sync misses orders
+ */
+router.post('/channel/:channelId/fetch-all-orders', authenticate, async (req: Request, res: Response) => {
+  try {
+    const { channelId } = req.params;
+
+    // Get channel with credentials and client info
+    const channel = await prisma.channel.findUnique({
+      where: { id: channelId },
+      include: {
+        client: {
+          include: {
+            jtlConfig: true,
+          },
+        },
+      },
+    });
+
+    if (!channel) {
+      return res.status(404).json({
+        success: false,
+        error: 'Channel not found',
+      });
+    }
+
+    const jtlConfig = channel.client?.jtlConfig;
+    if (!jtlConfig) {
+      return res.status(400).json({
+        success: false,
+        error: 'JTL configuration not found for client',
+      });
+    }
+
+    const encryptionService = getEncryptionService();
+
+    // Build orchestrator config
+    const orchestratorConfig: {
+      channelType: 'SHOPIFY' | 'WOOCOMMERCE';
+      channelId: string;
+      shopifyCredentials?: { shopDomain: string; accessToken: string };
+      wooCommerceCredentials?: { url: string; consumerKey: string; consumerSecret: string };
+      jtlCredentials: {
+        clientId: string;
+        clientSecret: string;
+        accessToken?: string;
+        refreshToken?: string;
+        environment: 'sandbox' | 'production';
+      };
+      jtlWarehouseId: string;
+      jtlFulfillerId: string;
+    } = {
+      channelType: channel.type as 'SHOPIFY' | 'WOOCOMMERCE',
+      channelId: channel.id,
+      jtlCredentials: {
+        clientId: jtlConfig.clientId,
+        clientSecret: encryptionService.safeDecrypt(jtlConfig.clientSecret),
+        accessToken: encryptionService.safeDecrypt(jtlConfig.accessToken) || undefined,
+        refreshToken: jtlConfig.refreshToken ? encryptionService.safeDecrypt(jtlConfig.refreshToken) : undefined,
+        environment: jtlConfig.environment as 'sandbox' | 'production',
+      },
+      jtlWarehouseId: jtlConfig.warehouseId,
+      jtlFulfillerId: jtlConfig.fulfillerId,
+    };
+
+    // Add channel-specific credentials
+    if (channel.type === 'SHOPIFY' && channel.shopDomain && channel.accessToken) {
+      orchestratorConfig.shopifyCredentials = {
+        shopDomain: channel.shopDomain,
+        accessToken: encryptionService.safeDecrypt(channel.accessToken),
+      };
+    } else if (channel.type === 'WOOCOMMERCE' && channel.apiUrl && channel.apiClientId && channel.apiClientSecret) {
+      orchestratorConfig.wooCommerceCredentials = {
+        url: channel.apiUrl,
+        consumerKey: channel.apiClientId,
+        consumerSecret: encryptionService.safeDecrypt(channel.apiClientSecret),
+      };
+    } else {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid channel credentials',
+      });
+    }
+
+    const { SyncOrchestrator } = await import('../services/integrations/sync-orchestrator.js');
+    const orchestrator = new SyncOrchestrator(prisma, orchestratorConfig);
+
+    console.log(`[FetchAll] Fetching ALL orders for channel ${channelId} (no date filter)`);
+
+    // Pull from channel only (no JTL push) with undefined since = fetch ALL
+    const result = await orchestrator.pullFromChannelOnly(undefined);
+
+    res.json({
+      success: true,
+      message: `Fetched ${result.orders.itemsProcessed} orders (${result.orders.itemsFailed} failed)`,
+      data: {
+        orders: result.orders,
+      },
+    });
+  } catch (error) {
+    console.error('[FetchAll] Error fetching all orders:', error);
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+});
+
+/**
+ * Fetch ALL data (products, orders, returns) from a channel without date filter
+ * This is a convenience endpoint that fetches everything at once
+ */
+router.post('/channel/:channelId/fetch-all', authenticate, async (req: Request, res: Response) => {
+  try {
+    const { channelId } = req.params;
+
+    // Get channel with credentials and client info
+    const channel = await prisma.channel.findUnique({
+      where: { id: channelId },
+      include: {
+        client: {
+          include: {
+            jtlConfig: true,
+          },
+        },
+      },
+    });
+
+    if (!channel) {
+      return res.status(404).json({
+        success: false,
+        error: 'Channel not found',
+      });
+    }
+
+    const jtlConfig = channel.client?.jtlConfig;
+    if (!jtlConfig) {
+      return res.status(400).json({
+        success: false,
+        error: 'JTL configuration not found for client',
+      });
+    }
+
+    const encryptionService = getEncryptionService();
+
+    // Build orchestrator config
+    const orchestratorConfig: {
+      channelType: 'SHOPIFY' | 'WOOCOMMERCE';
+      channelId: string;
+      shopifyCredentials?: { shopDomain: string; accessToken: string };
+      wooCommerceCredentials?: { url: string; consumerKey: string; consumerSecret: string };
+      jtlCredentials: {
+        clientId: string;
+        clientSecret: string;
+        accessToken?: string;
+        refreshToken?: string;
+        environment: 'sandbox' | 'production';
+      };
+      jtlWarehouseId: string;
+      jtlFulfillerId: string;
+    } = {
+      channelType: channel.type as 'SHOPIFY' | 'WOOCOMMERCE',
+      channelId: channel.id,
+      jtlCredentials: {
+        clientId: jtlConfig.clientId,
+        clientSecret: encryptionService.safeDecrypt(jtlConfig.clientSecret),
+        accessToken: encryptionService.safeDecrypt(jtlConfig.accessToken) || undefined,
+        refreshToken: jtlConfig.refreshToken ? encryptionService.safeDecrypt(jtlConfig.refreshToken) : undefined,
+        environment: jtlConfig.environment as 'sandbox' | 'production',
+      },
+      jtlWarehouseId: jtlConfig.warehouseId,
+      jtlFulfillerId: jtlConfig.fulfillerId,
+    };
+
+    // Add channel-specific credentials
+    if (channel.type === 'SHOPIFY' && channel.shopDomain && channel.accessToken) {
+      orchestratorConfig.shopifyCredentials = {
+        shopDomain: channel.shopDomain,
+        accessToken: encryptionService.safeDecrypt(channel.accessToken),
+      };
+    } else if (channel.type === 'WOOCOMMERCE' && channel.apiUrl && channel.apiClientId && channel.apiClientSecret) {
+      orchestratorConfig.wooCommerceCredentials = {
+        url: channel.apiUrl,
+        consumerKey: channel.apiClientId,
+        consumerSecret: encryptionService.safeDecrypt(channel.apiClientSecret),
+      };
+    } else {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid channel credentials',
+      });
+    }
+
+    const { SyncOrchestrator } = await import('../services/integrations/sync-orchestrator.js');
+    const orchestrator = new SyncOrchestrator(prisma, orchestratorConfig);
+
+    console.log(`[FetchAll] Fetching ALL data for channel ${channelId} (no date filter)`);
+
+    // Pull from channel only (no JTL push) with undefined since = fetch ALL
+    const result = await orchestrator.pullFromChannelOnly(undefined);
+
+    const totalProcessed = result.products.itemsProcessed + result.orders.itemsProcessed + result.returns.itemsProcessed;
+    const totalFailed = result.products.itemsFailed + result.orders.itemsFailed + result.returns.itemsFailed;
+
+    res.json({
+      success: totalFailed === 0,
+      message: `Fetched ${totalProcessed} items total (${totalFailed} failed)`,
+      data: {
+        products: result.products,
+        orders: result.orders,
+        returns: result.returns,
+      },
+    });
+  } catch (error) {
+    console.error('[FetchAll] Error fetching all data:', error);
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+});
+
 export default router;
 
