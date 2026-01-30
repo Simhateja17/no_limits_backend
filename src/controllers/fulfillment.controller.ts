@@ -62,11 +62,13 @@ async function getJTLService(clientId: string): Promise<JTLService | null> {
     return new JTLService({
       clientId: jtlConfig.clientId,
       clientSecret: encryptionService.decrypt(jtlConfig.clientSecret),
+      fulfillerId: jtlConfig.fulfillerId,
+      warehouseId: jtlConfig.warehouseId,
       environment: (jtlConfig.environment || 'sandbox') as 'sandbox' | 'production',
       accessToken: encryptionService.decrypt(jtlConfig.accessToken),
       refreshToken: jtlConfig.refreshToken ? encryptionService.decrypt(jtlConfig.refreshToken) : undefined,
       tokenExpiresAt: jtlConfig.tokenExpiresAt || undefined,
-    });
+    }, prisma, clientId);
   } catch (error) {
     console.error('[Fulfillment] Failed to get JTL service:', error);
     return null;
