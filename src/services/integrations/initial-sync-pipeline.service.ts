@@ -113,7 +113,14 @@ export class InitialSyncPipelineService {
   async startPipeline(options: PipelineStartOptions): Promise<PipelineResult> {
     const { channelId, clientId, syncFromDate, syncType = 'initial' } = options;
 
-    console.log(`[SyncPipeline] Starting pipeline for channel ${channelId}`);
+    console.log(`\n${'═'.repeat(60)}`);
+    console.log(`[SyncPipeline] STARTING INITIAL SYNC PIPELINE`);
+    console.log(`${'═'.repeat(60)}`);
+    console.log(`[SyncPipeline] Channel ID: ${channelId}`);
+    console.log(`[SyncPipeline] Client ID: ${clientId}`);
+    console.log(`[SyncPipeline] Sync Type: ${syncType}`);
+    console.log(`[SyncPipeline] Sync From Date: ${syncFromDate?.toISOString() || 'Not specified (will use 180 days)'}`);
+    console.log(`${'─'.repeat(60)}`);
 
     try {
       // Check if pipeline already exists for this channel
@@ -200,7 +207,10 @@ export class InitialSyncPipelineService {
    * Execute the pipeline sequentially
    */
   async executePipeline(pipelineId: string): Promise<void> {
-    console.log(`[SyncPipeline] Executing pipeline ${pipelineId}`);
+    const pipelineStartTime = Date.now();
+    console.log(`\n[SyncPipeline] ▶ Executing pipeline ${pipelineId}`);
+    console.log(`[SyncPipeline] Pipeline has ${PIPELINE_STEPS.length} steps:`);
+    PIPELINE_STEPS.forEach(s => console.log(`[SyncPipeline]   Step ${s.stepNumber}: ${s.stepName}`));
 
     try {
       // Mark pipeline as in progress
@@ -305,9 +315,21 @@ export class InitialSyncPipelineService {
         },
       });
 
-      console.log(`[SyncPipeline] Pipeline ${pipelineId} completed successfully`);
+      const totalDuration = ((Date.now() - pipelineStartTime) / 1000).toFixed(1);
+      console.log(`\n${'═'.repeat(60)}`);
+      console.log(`[SyncPipeline] ✅ PIPELINE COMPLETED SUCCESSFULLY`);
+      console.log(`${'═'.repeat(60)}`);
+      console.log(`[SyncPipeline] Pipeline ID: ${pipelineId}`);
+      console.log(`[SyncPipeline] Total Duration: ${totalDuration}s`);
+      console.log(`${'═'.repeat(60)}\n`);
     } catch (error) {
-      console.error(`[SyncPipeline] Pipeline ${pipelineId} execution error:`, error);
+      const totalDuration = ((Date.now() - pipelineStartTime) / 1000).toFixed(1);
+      console.error(`\n${'═'.repeat(60)}`);
+      console.error(`[SyncPipeline] ❌ PIPELINE FAILED`);
+      console.error(`${'═'.repeat(60)}`);
+      console.error(`[SyncPipeline] Pipeline ID: ${pipelineId}`);
+      console.error(`[SyncPipeline] Duration before failure: ${totalDuration}s`);
+      console.error(`[SyncPipeline] Error:`, error);
 
       await this.prisma.syncPipeline.update({
         where: { id: pipelineId },
@@ -361,7 +383,12 @@ export class InitialSyncPipelineService {
       return { success: false, error: `Step ${stepNumber} not found` };
     }
 
-    console.log(`[SyncPipeline] Executing step ${stepNumber}: ${step.stepName}`);
+    const stepStartTime = Date.now();
+    console.log(`\n${'─'.repeat(60)}`);
+    console.log(`[SyncPipeline] 📦 STEP ${stepNumber}/${PIPELINE_STEPS.length}: ${step.stepName.toUpperCase()}`);
+    console.log(`${'─'.repeat(60)}`);
+    console.log(`[SyncPipeline] Description: ${step.stepDescription}`);
+    console.log(`[SyncPipeline] Started at: ${new Date().toISOString()}`);
 
     // Update step status to in progress
     await this.prisma.pipelineStep.updateMany({
@@ -428,6 +455,15 @@ export class InitialSyncPipelineService {
         },
       });
 
+      const stepDuration = ((Date.now() - stepStartTime) / 1000).toFixed(1);
+      if (result.success) {
+        console.log(`[SyncPipeline] ✅ Step ${stepNumber} completed in ${stepDuration}s`);
+        console.log(`[SyncPipeline]    Items processed: ${result.itemsProcessed || 0}, Failed: ${result.itemsFailed || 0}`);
+      } else {
+        console.log(`[SyncPipeline] ❌ Step ${stepNumber} failed after ${stepDuration}s`);
+        console.log(`[SyncPipeline]    Error: ${result.error}`);
+      }
+
       return result;
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
@@ -481,6 +517,8 @@ export class InitialSyncPipelineService {
     };
   }): Promise<{ success: boolean; itemsProcessed?: number; itemsFailed?: number; error?: string }> {
     console.log('[SyncPipeline] Step 1: Pulling channel data (unidirectional - no JTL push)');
+    console.log(`[SyncPipeline] Channel Type: ${pipeline.channel.type}`);
+    console.log(`[SyncPipeline] This step pulls: Products, Orders, Returns from ${pipeline.channel.type}`);
 
     const { channel, channelId, syncFromDate } = pipeline;
     const jtlConfig = channel.client.jtlConfig;
@@ -540,9 +578,11 @@ export class InitialSyncPipelineService {
 
     // Use syncFromDate if provided, otherwise default to 180 days
     const since = syncFromDate || new Date(Date.now() - 180 * 24 * 60 * 60 * 1000);
+    console.log(`[SyncPipeline] Pulling data since: ${since.toISOString()}`);
 
     // Use pullFromChannelOnly instead of runFullSync to avoid JTL push
     // This prevents Products_DuplicateProduct errors during initial sync
+    console.log(`[SyncPipeline] Calling pullFromChannelOnly...`);
     const result = await orchestrator.pullFromChannelOnly(since);
 
     const totalProcessed =
@@ -555,7 +595,11 @@ export class InitialSyncPipelineService {
       result.orders.itemsFailed +
       result.returns.itemsFailed;
 
-    console.log(`[SyncPipeline] Step 1 complete: ${totalProcessed} items processed, ${totalFailed} failed`);
+    console.log(`[SyncPipeline] Step 1 Results:`);
+    console.log(`[SyncPipeline]   📦 Products: ${result.products.itemsProcessed} processed, ${result.products.itemsFailed} failed`);
+    console.log(`[SyncPipeline]   🛒 Orders: ${result.orders.itemsProcessed} processed, ${result.orders.itemsFailed} failed`);
+    console.log(`[SyncPipeline]   ↩️  Returns: ${result.returns.itemsProcessed} processed, ${result.returns.itemsFailed} failed`);
+    console.log(`[SyncPipeline]   📊 Total: ${totalProcessed} processed, ${totalFailed} failed`);
 
     return {
       success: totalFailed === 0,
@@ -571,10 +615,21 @@ export class InitialSyncPipelineService {
   private async stepImportJTLProducts(pipeline: {
     clientId: string;
   }): Promise<{ success: boolean; itemsProcessed?: number; itemsFailed?: number; error?: string }> {
-    console.log('[SyncPipeline] Step 2: Importing products from JTL');
+    console.log('[SyncPipeline] Step 2: Importing products from JTL FFN');
+    console.log(`[SyncPipeline] This step imports products that exist in JTL but not in local DB`);
+    console.log(`[SyncPipeline] Client ID: ${pipeline.clientId}`);
 
     const productSyncService = new ProductSyncService(this.prisma);
+    console.log(`[SyncPipeline] Calling importProductsFromJTL...`);
     const result = await productSyncService.importProductsFromJTL(pipeline.clientId);
+
+    console.log(`[SyncPipeline] Step 2 Results:`);
+    console.log(`[SyncPipeline]   📥 Imported: ${result.imported} products from JTL`);
+    console.log(`[SyncPipeline]   ⏭️  Skipped: ${result.skipped} (already exist locally)`);
+    console.log(`[SyncPipeline]   ❌ Failed: ${result.failed}`);
+    if (result.errors.length > 0) {
+      console.log(`[SyncPipeline]   Errors: ${result.errors.slice(0, 3).join('; ')}${result.errors.length > 3 ? '...' : ''}`);
+    }
 
     return {
       success: result.failed === 0,
@@ -596,12 +651,15 @@ export class InitialSyncPipelineService {
   private async stepPushProductsToJTL(pipeline: {
     clientId: string;
   }): Promise<{ success: boolean; itemsProcessed?: number; itemsFailed?: number; error?: string }> {
-    console.log('[SyncPipeline] Step 3: Pushing products to JTL (JTL-only, skipping Shopify/WooCommerce)');
+    console.log('[SyncPipeline] Step 3: Pushing products to JTL FFN');
+    console.log(`[SyncPipeline] This step creates products in JTL FFN (with duplicate handling)`);
+    console.log(`[SyncPipeline] Client ID: ${pipeline.clientId}`);
 
     const productSyncService = new ProductSyncService(this.prisma);
+    console.log(`[SyncPipeline] Calling pushToJTLOnly...`);
     const result = await productSyncService.pushToJTLOnly(pipeline.clientId);
 
-    console.log(`[SyncPipeline] Step 3 complete:`);
+    console.log(`[SyncPipeline] Step 3 Results:`);
     console.log(`[SyncPipeline]   - ${result.synced} created in JTL`);
     console.log(`[SyncPipeline]   - ${result.skippedAlreadyLinked} linked to existing JTL products (no duplicate push)`);
     console.log(`[SyncPipeline]   - ${result.skipped} skipped (already linked in DB)`);
@@ -650,7 +708,9 @@ export class InitialSyncPipelineService {
       };
     };
   }): Promise<{ success: boolean; itemsProcessed?: number; itemsFailed?: number; error?: string }> {
-    console.log('[SyncPipeline] Step 4: Syncing order statuses');
+    console.log('[SyncPipeline] Step 4: Syncing order statuses from JTL FFN');
+    console.log(`[SyncPipeline] This step links JTL outbounds to local orders and syncs fulfillment statuses`);
+    console.log(`[SyncPipeline] Channel ID: ${pipeline.channelId}`);
 
     const { channel, channelId } = pipeline;
     const jtlConfig = channel.client.jtlConfig;
@@ -706,16 +766,37 @@ export class InitialSyncPipelineService {
 
     const orchestrator = new SyncOrchestrator(this.prisma, orchestratorConfig);
 
-    // Use the syncFromDate if provided, otherwise default to 180 days
+    // Step 4a: First, link existing JTL outbounds to local orders by matching order numbers
+    // This is a one-time reconciliation for historical orders
+    console.log(`[SyncPipeline] Step 4a: Linking existing JTL outbounds to local orders...`);
+    console.log(`[SyncPipeline] This matches JTL outbounds to local orders by order number`);
+    const linkResult = await orchestrator.linkJTLOutboundsToOrders();
+    console.log(`[SyncPipeline] Step 4a Results:`);
+    console.log(`[SyncPipeline]   🔗 Linked: ${linkResult.linked} orders linked to JTL outbounds`);
+    console.log(`[SyncPipeline]   ✅ Already linked: ${linkResult.alreadyLinked}`);
+    console.log(`[SyncPipeline]   ⚠️  Not found in local DB: ${linkResult.notFound}`);
+    if (linkResult.errors.length > 0) {
+      console.log(`[SyncPipeline]   ❌ Errors: ${linkResult.errors.length}`);
+    }
+
+    // Step 4b: Poll for any recent status updates
     const since = pipeline.syncFromDate || new Date(Date.now() - 180 * 24 * 60 * 60 * 1000);
-    console.log(`[SyncPipeline] Polling JTL outbound updates since ${since.toISOString()}`);
+    console.log(`[SyncPipeline] Step 4b: Polling JTL outbound updates since ${since.toISOString()}`);
     const result = await orchestrator.pollJTLOutboundUpdates(since);
+    console.log(`[SyncPipeline] Step 4b Results:`);
+    console.log(`[SyncPipeline]   📊 Status updates processed: ${result.itemsProcessed}`);
+    console.log(`[SyncPipeline]   ❌ Failed: ${result.itemsFailed}`);
+
+    const totalProcessed = linkResult.linked + result.itemsProcessed;
+    const totalFailed = linkResult.errors.length + result.itemsFailed;
+
+    console.log(`[SyncPipeline] Step 4 Total: ${totalProcessed} processed, ${totalFailed} failed`);
 
     return {
-      success: result.itemsFailed === 0,
-      itemsProcessed: result.itemsProcessed,
-      itemsFailed: result.itemsFailed,
-      error: result.error,
+      success: totalFailed === 0,
+      itemsProcessed: totalProcessed,
+      itemsFailed: totalFailed,
+      error: totalFailed > 0 ? `Linking errors: ${linkResult.errors.length}, Poll errors: ${result.itemsFailed}` : undefined,
     };
   }
 
@@ -725,10 +806,21 @@ export class InitialSyncPipelineService {
   private async stepSyncStockLevels(pipeline: {
     clientId: string;
   }): Promise<{ success: boolean; itemsProcessed?: number; itemsFailed?: number; error?: string }> {
-    console.log('[SyncPipeline] Step 5: Syncing stock levels');
+    console.log('[SyncPipeline] Step 5: Syncing stock/inventory levels from JTL FFN');
+    console.log(`[SyncPipeline] This step pulls stock levels from JTL and updates local products`);
+    console.log(`[SyncPipeline] Client ID: ${pipeline.clientId}`);
 
     const stockSyncService = new StockSyncService(this.prisma);
+    console.log(`[SyncPipeline] Calling syncStockForClient...`);
     const result = await stockSyncService.syncStockForClient(pipeline.clientId);
+
+    console.log(`[SyncPipeline] Step 5 Results:`);
+    console.log(`[SyncPipeline]   📦 Products updated: ${result.productsUpdated}`);
+    console.log(`[SyncPipeline]   ⏭️  Skipped: ${result.productsSkipped || 0}`);
+    console.log(`[SyncPipeline]   ❌ Failed: ${result.productsFailed}`);
+    if (result.errors.length > 0) {
+      console.log(`[SyncPipeline]   Errors: ${result.errors.slice(0, 3).join('; ')}${result.errors.length > 3 ? '...' : ''}`);
+    }
 
     return {
       success: result.productsFailed === 0,

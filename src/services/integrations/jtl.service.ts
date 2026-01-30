@@ -474,9 +474,12 @@ export class JTLService {
 
     const query = queryParams.toString();
     const endpoint = `/v1/merchant/outbounds${query ? `?${query}` : ''}`;
-    
-    const response = await this.request<{ outbounds: JTLOutboundResponse[] }>(endpoint);
-    return response.outbounds || [];
+
+    const response = await this.request<{ items?: JTLOutboundResponse[]; outbounds?: JTLOutboundResponse[]; count?: number }>(endpoint);
+    // JTL API returns items, not outbounds (similar to products endpoint)
+    const outbounds = response.items || response.outbounds || [];
+    console.log(`[JTL] getOutbounds response: count=${response.count}, items.length=${outbounds.length}`);
+    return outbounds;
   }
 
   /**
@@ -551,9 +554,11 @@ export class JTLService {
 
     const query = queryParams.toString();
     const endpoint = `/v1/merchant/outbounds/updates${query ? `?${query}` : ''}`;
-    
-    const response = await this.request<{ updates: JTLUpdateItem<JTLOutboundResponse>[] }>(endpoint);
-    return response.updates || [];
+
+    const response = await this.request<{ items?: JTLUpdateItem<JTLOutboundResponse>[]; updates?: JTLUpdateItem<JTLOutboundResponse>[]; count?: number }>(endpoint);
+    const updates = response.items || response.updates || [];
+    console.log(`[JTL] getOutboundUpdates response: count=${response.count}, items.length=${updates.length}`);
+    return updates;
   }
 
   // ============= PRODUCTS =============
@@ -650,8 +655,12 @@ export class JTLService {
 
     const query = queryParams.toString();
     const endpoint = `/v1/merchant/products${query ? `?${query}` : ''}`;
-    
-    const response = await this.request<{ items: JTLProductResponse[] }>(endpoint);
+
+    const response = await this.request<{ items: JTLProductResponse[]; count?: number }>(endpoint);
+    console.log(`[JTL] getProducts response: count=${response.count}, items.length=${response.items?.length || 0}`);
+    if (response.items?.length > 0) {
+      console.log(`[JTL] First item: jfsku=${response.items[0].jfsku}, merchantSku=${response.items[0].merchantSku}`);
+    }
     return response.items || [];
   }
 

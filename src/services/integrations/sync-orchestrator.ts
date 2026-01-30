@@ -598,11 +598,14 @@ export class SyncOrchestrator {
         ? await this.shopifyService.getOrdersCreatedSince(since)
         : await this.shopifyService.getAllOrders({ status: 'any' });
 
+      let ordersWithoutAddress = 0;
       for (const order of shopifyOrders) {
-        if (order.shipping_address) {
-          orders.push(this.mapShopifyOrder(order));
+        orders.push(this.mapShopifyOrder(order));
+        if (!order.shipping_address) {
+          ordersWithoutAddress++;
         }
       }
+      console.log(`[Shopify] Processing ${orders.length} orders (${ordersWithoutAddress} without shipping address)`);
     } else if (this.config.channelType === 'WOOCOMMERCE' && this.wooCommerceService) {
       // For historic sync with a date, use created_at filter
       const wooOrders = since
@@ -1041,6 +1044,147 @@ export class SyncOrchestrator {
   }
 
   // ============= JTL UPDATES POLLING =============
+
+  /**
+   * Link existing JTL outbounds to local orders by matching order numbers
+   * This is a one-time reconciliation for historical orders that exist in JTL FFN
+   * but haven't been linked to local orders yet.
+   */
+  async linkJTLOutboundsToOrders(): Promise<{ linked: number; alreadyLinked: number; notFound: number; errors: string[] }> {
+    console.log(`\n[JTL] ${'─'.repeat(50)}`);
+    console.log('[JTL] Starting outbound-to-order linking reconciliation...');
+    console.log(`[JTL] ${'─'.repeat(50)}`);
+
+    let linked = 0;
+    let alreadyLinked = 0;
+    let notFound = 0;
+    const errors: string[] = [];
+
+    try {
+      // Fetch all outbounds from JTL (paginated)
+      let offset = 0;
+      const limit = 100;
+      let hasMore = true;
+      const allOutbounds: Array<{ id: string; merchantOutboundNumber: string; status: string }> = [];
+
+      let pageCount = 0;
+      while (hasMore) {
+        pageCount++;
+        const outbounds = await this.jtlService.getOutbounds({ limit, offset });
+
+        for (const outbound of outbounds) {
+          allOutbounds.push({
+            id: outbound.id,
+            merchantOutboundNumber: outbound.merchantOutboundNumber,
+            status: outbound.status,
+          });
+        }
+
+        console.log(`[JTL] Page ${pageCount}: Fetched ${outbounds.length} outbounds (Total: ${allOutbounds.length})`);
+
+        if (outbounds.length < limit) {
+          hasMore = false;
+        } else {
+          offset += limit;
+          await new Promise(resolve => setTimeout(resolve, 200)); // Rate limiting
+        }
+      }
+
+      console.log(`[JTL] Outbound fetch complete: ${allOutbounds.length} total outbounds in ${pageCount} pages`);
+
+      // Get all orders for this channel that don't have a jtlOutboundId yet
+      const unlinkdOrders = await this.prisma.order.findMany({
+        where: {
+          channelId: this.config.channelId,
+          jtlOutboundId: null,
+        },
+        select: {
+          id: true,
+          orderId: true,
+          orderNumber: true,
+          externalOrderId: true,
+        },
+      });
+
+      console.log(`[JTL] Found ${unlinkdOrders.length} local orders without JTL outbound link`);
+
+      // Create a map for quick lookup by various order identifiers
+      const orderMap = new Map<string, { id: string; orderId: string; orderNumber: string | null; externalOrderId: string | null }>();
+      for (const order of unlinkdOrders) {
+        // Map by orderId (our internal display ID)
+        if (order.orderId) {
+          orderMap.set(order.orderId.toLowerCase(), order);
+        }
+        // Map by orderNumber
+        if (order.orderNumber) {
+          orderMap.set(order.orderNumber.toLowerCase(), order);
+        }
+        // Map by externalOrderId (Shopify/WooCommerce order ID)
+        if (order.externalOrderId) {
+          orderMap.set(order.externalOrderId.toLowerCase(), order);
+        }
+      }
+
+      // Try to match each outbound to a local order
+      for (const outbound of allOutbounds) {
+        try {
+          // Check if this outbound is already linked to an order
+          const existingLink = await this.prisma.order.findFirst({
+            where: { jtlOutboundId: outbound.id },
+            select: { id: true },
+          });
+
+          if (existingLink) {
+            alreadyLinked++;
+            continue;
+          }
+
+          // Try to find matching order by merchantOutboundNumber
+          const merchantNum = outbound.merchantOutboundNumber?.toLowerCase();
+          const matchedOrder = merchantNum ? orderMap.get(merchantNum) : null;
+
+          if (matchedOrder) {
+            // Link the order to the JTL outbound
+            const newStatus = this.mapJTLStatusToOrderStatus(outbound.status);
+            const newFulfillmentState = this.mapJTLStatusToFulfillmentState(outbound.status);
+
+            await this.prisma.order.update({
+              where: { id: matchedOrder.id },
+              data: {
+                jtlOutboundId: outbound.id,
+                status: newStatus,
+                fulfillmentState: newFulfillmentState as any,
+                lastJtlSync: new Date(),
+              },
+            });
+
+            console.log(`[JTL] Linked order ${matchedOrder.orderId} to outbound ${outbound.id} (status: ${outbound.status})`);
+            linked++;
+
+            // Remove from map so we don't try to link it again
+            if (matchedOrder.orderId) orderMap.delete(matchedOrder.orderId.toLowerCase());
+            if (matchedOrder.orderNumber) orderMap.delete(matchedOrder.orderNumber.toLowerCase());
+            if (matchedOrder.externalOrderId) orderMap.delete(matchedOrder.externalOrderId.toLowerCase());
+          } else {
+            notFound++;
+          }
+        } catch (error) {
+          const errMsg = `Failed to link outbound ${outbound.id}: ${error instanceof Error ? error.message : 'Unknown error'}`;
+          errors.push(errMsg);
+          console.error(`[JTL] ${errMsg}`);
+        }
+      }
+
+      console.log(`[JTL] Outbound linking complete: ${linked} linked, ${alreadyLinked} already linked, ${notFound} not found in local DB`);
+
+      return { linked, alreadyLinked, notFound, errors };
+    } catch (error) {
+      const errMsg = `Failed to fetch outbounds from JTL: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      console.error(`[JTL] ${errMsg}`);
+      errors.push(errMsg);
+      return { linked, alreadyLinked, notFound, errors };
+    }
+  }
 
   /**
    * Poll JTL for outbound (order) status updates
