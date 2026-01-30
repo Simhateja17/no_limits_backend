@@ -121,10 +121,17 @@ interface GraphQLProductVariant {
   price: string;
   sku?: string;
   barcode?: string;
-  weight?: number;
-  weightUnit?: string;
   inventoryQuantity?: number;
-  inventoryItem?: { id: string; legacyResourceId?: string };
+  inventoryItem?: {
+    id: string;
+    legacyResourceId?: string;
+    measurement?: {
+      weight?: {
+        value: number;
+        unit: string;  // GRAMS, KILOGRAMS, OUNCES, POUNDS
+      };
+    };
+  };
 }
 
 interface GraphQLProductImage {
@@ -312,8 +319,34 @@ export function mapOrder(order: GraphQLOrder): ShopifyOrder {
 
 /**
  * Map GraphQL product variant to REST format
+ * Note: weight is now at inventoryItem.measurement.weight (API 2024-07+)
  */
 export function mapVariant(variant: GraphQLProductVariant, productId: number): ShopifyVariant {
+  // Extract weight from the new inventoryItem.measurement.weight path
+  const weightMeasurement = variant.inventoryItem?.measurement?.weight;
+  const weightValue = weightMeasurement?.value || 0;
+  const weightUnit = weightMeasurement?.unit || 'GRAMS';
+
+  // Convert to grams for the grams field
+  let grams = 0;
+  if (weightValue > 0) {
+    switch (weightUnit) {
+      case 'KILOGRAMS':
+        grams = Math.round(weightValue * 1000);
+        break;
+      case 'POUNDS':
+        grams = Math.round(weightValue * 453.592);
+        break;
+      case 'OUNCES':
+        grams = Math.round(weightValue * 28.3495);
+        break;
+      case 'GRAMS':
+      default:
+        grams = Math.round(weightValue);
+        break;
+    }
+  }
+
   return {
     id: getNumericId(variant.id, variant.legacyResourceId),
     product_id: productId,
@@ -321,9 +354,9 @@ export function mapVariant(variant: GraphQLProductVariant, productId: number): S
     price: variant.price,
     sku: variant.sku || '',
     barcode: variant.barcode || null,
-    grams: variant.weight ? Math.round(variant.weight * (variant.weightUnit === 'KILOGRAMS' ? 1000 : 1)) : 0,
-    weight: variant.weight || 0,
-    weight_unit: variant.weightUnit?.toLowerCase() || 'g',
+    grams,
+    weight: weightValue,
+    weight_unit: weightUnit.toLowerCase(),
     inventory_quantity: variant.inventoryQuantity || 0,
     inventory_item_id: variant.inventoryItem ? getNumericId(variant.inventoryItem.id, variant.inventoryItem.legacyResourceId) : 0,
   };

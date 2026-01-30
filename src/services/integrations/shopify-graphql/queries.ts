@@ -52,7 +52,6 @@ export const CUSTOMER_FRAGMENT = `
 export const LINE_ITEM_FRAGMENT = `
   fragment LineItemFields on LineItem {
     id
-    legacyResourceId
     variant {
       id
       legacyResourceId
@@ -70,7 +69,6 @@ export const LINE_ITEM_FRAGMENT = `
     }
     fulfillmentStatus
   }
-  ${MONEY_BAG_FRAGMENT}
 `;
 
 export const SHIPPING_LINE_FRAGMENT = `
@@ -82,21 +80,18 @@ export const SHIPPING_LINE_FRAGMENT = `
       ...MoneyBagFields
     }
   }
-  ${MONEY_BAG_FRAGMENT}
 `;
 
 export const REFUND_LINE_ITEM_FRAGMENT = `
   fragment RefundLineItemFields on RefundLineItem {
     lineItem {
       id
-      legacyResourceId
     }
     quantity
     subtotalSet {
       ...MoneyBagFields
     }
   }
-  ${MONEY_BAG_FRAGMENT}
 `;
 
 export const REFUND_FRAGMENT = `
@@ -113,7 +108,6 @@ export const REFUND_FRAGMENT = `
       }
     }
   }
-  ${REFUND_LINE_ITEM_FRAGMENT}
 `;
 
 export const VARIANT_FRAGMENT = `
@@ -124,12 +118,16 @@ export const VARIANT_FRAGMENT = `
     price
     sku
     barcode
-    weight
-    weightUnit
     inventoryQuantity
     inventoryItem {
       id
       legacyResourceId
+      measurement {
+        weight {
+          value
+          unit
+        }
+      }
     }
   }
 `;
@@ -210,6 +208,7 @@ export const GET_ORDERS_QUERY = `
   ${ADDRESS_FRAGMENT}
   ${LINE_ITEM_FRAGMENT}
   ${SHIPPING_LINE_FRAGMENT}
+  ${REFUND_LINE_ITEM_FRAGMENT}
   ${REFUND_FRAGMENT}
 `;
 
@@ -271,6 +270,7 @@ export const GET_ORDER_QUERY = `
   ${ADDRESS_FRAGMENT}
   ${LINE_ITEM_FRAGMENT}
   ${SHIPPING_LINE_FRAGMENT}
+  ${REFUND_LINE_ITEM_FRAGMENT}
   ${REFUND_FRAGMENT}
 `;
 
@@ -334,7 +334,6 @@ export const GET_ORDER_FULFILLMENT_ORDERS_QUERY = `
                   remainingQuantity
                   lineItem {
                     id
-                    legacyResourceId
                     sku
                     title
                     quantity
@@ -426,7 +425,6 @@ export const GET_FULFILLMENT_ORDER_QUERY = `
               remainingQuantity
               lineItem {
                 id
-                legacyResourceId
                 sku
                 title
               }
@@ -728,7 +726,6 @@ export const GET_SUGGESTED_REFUND_QUERY = `
         refundLineItems {
           lineItem {
             id
-            legacyResourceId
           }
           quantity
           subtotal
