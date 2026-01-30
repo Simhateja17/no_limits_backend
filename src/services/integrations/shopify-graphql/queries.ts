@@ -326,7 +326,7 @@ export const GET_ORDER_FULFILLMENT_ORDERS_QUERY = `
               serviceCode
             }
 
-            fulfillmentOrderLineItems(first: 100) {
+            lineItems(first: 100) {
               edges {
                 node {
                   id
@@ -417,7 +417,7 @@ export const GET_FULFILLMENT_ORDER_QUERY = `
           methodType
           serviceCode
         }
-        fulfillmentOrderLineItems(first: 100) {
+        lineItems(first: 100) {
           edges {
             node {
               id
@@ -477,7 +477,7 @@ export const GET_FULFILLMENT_ORDERS_QUERY = `
               name
             }
           }
-          fulfillmentOrderLineItems(first: 50) {
+          lineItems(first: 50) {
             edges {
               node {
                 id

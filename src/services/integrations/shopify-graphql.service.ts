@@ -831,7 +831,7 @@ export class ShopifyGraphQLService {
                 phone?: string;
                 email?: string;
               };
-              fulfillmentOrderLineItems: {
+              lineItems: {
                 edges: Array<{
                   node: {
                     id: string;
@@ -853,7 +853,7 @@ export class ShopifyGraphQLService {
 
     return data.order.fulfillmentOrders.edges.map(e => ({
       ...e.node,
-      lineItems: e.node.fulfillmentOrderLineItems?.edges?.map(li => li.node) || [],
+      lineItems: e.node.lineItems?.edges?.map(li => li.node) || [],
     }));
   }
 
@@ -877,7 +877,7 @@ export class ShopifyGraphQLService {
         status: string;
         requestStatus: string;
         order?: { id: string; legacyResourceId?: string; name?: string };
-        fulfillmentOrderLineItems?: {
+        lineItems?: {
           edges: Array<{
             node: { id: string; remainingQuantity: number; lineItem: { id: string; sku?: string } };
           }>;
@@ -889,7 +889,7 @@ export class ShopifyGraphQLService {
 
     return {
       ...data.node,
-      lineItems: data.node.fulfillmentOrderLineItems?.edges?.map(li => li.node) || [],
+      lineItems: data.node.lineItems?.edges?.map(li => li.node) || [],
     };
   }
 
