@@ -9,6 +9,7 @@
 import { Request, Response } from 'express';
 import { prisma } from '../config/database.js';
 import { JTLService } from '../services/integrations/jtl.service.js';
+import { SyncOrchestrator } from '../services/integrations/sync-orchestrator.js';
 import { getEncryptionService } from '../services/encryption.service.js';
 
 // Types
@@ -1351,6 +1352,102 @@ export const getWarehouses = async (req: Request, res: Response): Promise<void> 
     res.status(500).json({
       success: false,
       error: 'Failed to fetch warehouses',
+    });
+  }
+};
+
+/**
+ * POST /api/fulfillment/fix-no-sku-items
+ * Fix existing order items that have NO-SKU-* values by resolving them to real products
+ * Admin only - this is a data migration/fix operation
+ */
+export const fixNoSkuItems = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { channelId } = req.body;
+
+    if (!channelId) {
+      res.status(400).json({
+        success: false,
+        error: 'channelId is required',
+      });
+      return;
+    }
+
+    // Verify channel exists and get its configuration
+    const channel = await prisma.channel.findUnique({
+      where: { id: channelId },
+      include: {
+        client: {
+          include: {
+            jtlConfig: true,
+          },
+        },
+      },
+    });
+
+    if (!channel) {
+      res.status(404).json({
+        success: false,
+        error: 'Channel not found',
+      });
+      return;
+    }
+
+    // Get JTL config for the client
+    const jtlConfig = channel.client?.jtlConfig;
+    if (!jtlConfig) {
+      res.status(400).json({
+        success: false,
+        error: 'JTL FFN not configured for this client',
+      });
+      return;
+    }
+
+    const encryptionService = getEncryptionService();
+
+    // Build sync config
+    const syncConfig: any = {
+      channelId: channel.id,
+      channelType: channel.type,
+      jtlCredentials: {
+        clientId: jtlConfig.clientId,
+        clientSecret: encryptionService.decrypt(jtlConfig.clientSecret),
+        environment: (jtlConfig.environment || 'sandbox') as 'sandbox' | 'production',
+        accessToken: jtlConfig.accessToken ? encryptionService.decrypt(jtlConfig.accessToken) : undefined,
+        refreshToken: jtlConfig.refreshToken ? encryptionService.decrypt(jtlConfig.refreshToken) : undefined,
+      },
+      jtlWarehouseId: jtlConfig.warehouseId || '',
+      jtlFulfillerId: jtlConfig.fulfillerId || '',
+    };
+
+    // Add channel-specific credentials
+    if (channel.type === 'SHOPIFY' && channel.shopDomain && channel.accessToken) {
+      syncConfig.shopifyCredentials = {
+        shopDomain: channel.shopDomain,
+        accessToken: encryptionService.decrypt(channel.accessToken),
+      };
+    } else if (channel.type === 'WOOCOMMERCE' && channel.apiUrl && channel.apiClientId && channel.apiClientSecret) {
+      syncConfig.wooCommerceCredentials = {
+        url: channel.apiUrl,
+        consumerKey: encryptionService.decrypt(channel.apiClientId),
+        consumerSecret: encryptionService.decrypt(channel.apiClientSecret),
+      };
+    }
+
+    // Create sync orchestrator and run the fix
+    const orchestrator = new SyncOrchestrator(prisma, syncConfig);
+    const result = await orchestrator.fixExistingNoSkuItems();
+
+    res.json({
+      success: true,
+      message: `Fixed ${result.fixed} out of ${result.totalNoSkuItems} NO-SKU items`,
+      data: result,
+    });
+  } catch (error) {
+    console.error('[Fulfillment] Error fixing NO-SKU items:', error);
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Failed to fix NO-SKU items',
     });
   }
 };

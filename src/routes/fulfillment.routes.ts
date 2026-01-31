@@ -20,6 +20,7 @@ import {
   getJTLStatus,
   getShippingMethods,
   getWarehouses,
+  fixNoSkuItems,
 } from '../controllers/fulfillment.controller.js';
 import { authenticate, requireAdmin } from '../middleware/auth.js';
 
@@ -76,5 +77,9 @@ router.get('/shipping-methods', getShippingMethods);
 
 // GET /api/fulfillment/warehouses - Get JTL FFN warehouses
 router.get('/warehouses', getWarehouses);
+
+// ============= DATA FIX OPERATIONS =============
+// POST /api/fulfillment/fix-no-sku-items - Fix existing NO-SKU-* items (Admin only)
+router.post('/fix-no-sku-items', requireAdmin, fixNoSkuItems);
 
 export default router;

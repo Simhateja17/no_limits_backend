@@ -746,15 +746,31 @@ export class SyncOrchestrator {
             create: await Promise.all(orderData.items.map(async (item) => {
               // Find product by SKU (only if SKU exists)
               let product = null;
+              let resolvedSku = item.sku || `NO-SKU-${Date.now()}`;
+
               if (item.sku && !item.sku.startsWith('NO-SKU-')) {
+                // Normal SKU - look up directly
                 product = await this.prisma.product.findFirst({
                   where: { sku: item.sku },
                 });
+              } else if (item.sku?.startsWith('NO-SKU-')) {
+                // NO-SKU fallback - try to find product by variant ID or name
+                const fallbackProduct = await this.findProductByFallback(
+                  item.sku,
+                  item.productName,
+                  channel.clientId
+                );
+                if (fallbackProduct) {
+                  product = fallbackProduct;
+                  // Update SKU to use the real SKU from the matched product
+                  resolvedSku = fallbackProduct.sku;
+                  console.log(`[SyncOrchestrator] Resolved NO-SKU item to real SKU: ${item.sku} -> ${resolvedSku}`);
+                }
               }
 
               return {
                 productId: product?.id,
-                sku: item.sku || `NO-SKU-${Date.now()}`, // Fallback for items without SKU
+                sku: resolvedSku,
                 quantity: item.quantity,
                 // Prefer productName from order data, then product lookup, then fallback
                 productName: item.productName || product?.name || 'Unknown Product',
@@ -779,19 +795,40 @@ export class SyncOrchestrator {
    * Push order to JTL FFN as outbound
    */
   private async pushOrderToJTL(orderData: OrderSyncData & { status: OrderStatus }): Promise<void> {
+    // Get channel for clientId (needed for fallback product lookup)
+    const channel = await this.prisma.channel.findUnique({
+      where: { id: this.config.channelId },
+      select: { clientId: true },
+    });
+
     // Get JTL product IDs for order items
     const itemsWithJtlIds = await Promise.all(
       orderData.items.map(async (item) => {
-        // Skip product lookup if no SKU
         let product = null;
-        if (item.sku) {
+        let resolvedSku = item.sku;
+
+        if (item.sku && !item.sku.startsWith('NO-SKU-')) {
+          // Normal SKU - look up directly
           product = await this.prisma.product.findFirst({
             where: { sku: item.sku },
           });
+        } else if (item.sku?.startsWith('NO-SKU-')) {
+          // NO-SKU fallback - try to find product by variant ID or name
+          const fallbackProduct = await this.findProductByFallback(
+            item.sku,
+            item.productName,
+            channel?.clientId
+          );
+          if (fallbackProduct) {
+            product = fallbackProduct;
+            resolvedSku = fallbackProduct.sku;
+            console.log(`[SyncOrchestrator] JTL push: Resolved NO-SKU to real SKU: ${item.sku} -> ${resolvedSku}`);
+          }
         }
 
         return {
           ...item,
+          sku: resolvedSku,
           jtlJfsku: product?.jtlProductId || undefined,
         };
       })
@@ -984,18 +1021,34 @@ export class SyncOrchestrator {
       include: { items: true },
     });
 
-    // Map items with JTL IDs
+    // Map items with JTL IDs (with fallback lookup for NO-SKU items)
     const itemsWithJtlIds = await Promise.all(
       refundData.items.map(async (item) => {
-        // Skip product lookup if no SKU
         let product = null;
-        if (item.sku) {
+        let resolvedSku = item.sku;
+
+        if (item.sku && !item.sku.startsWith('NO-SKU-')) {
+          // Normal SKU - look up directly
           product = await this.prisma.product.findFirst({
             where: { sku: item.sku },
           });
+        } else if (item.sku?.startsWith('NO-SKU-')) {
+          // NO-SKU fallback - try to find product by variant ID
+          const fallbackProduct = await this.findProductByFallback(
+            item.sku,
+            undefined, // No product name available in refund data
+            order.clientId
+          );
+          if (fallbackProduct) {
+            product = fallbackProduct;
+            resolvedSku = fallbackProduct.sku;
+            console.log(`[SyncOrchestrator] Return: Resolved NO-SKU to real SKU: ${item.sku} -> ${resolvedSku}`);
+          }
         }
+
         return {
           ...item,
+          sku: resolvedSku,
           jtlJfsku: product?.jtlProductId || undefined,
         };
       })
@@ -2150,6 +2203,203 @@ export class SyncOrchestrator {
     };
 
     return statusMap[jtlStatus] || 'PENDING';
+  }
+
+  /**
+   * Fix existing order items that have NO-SKU-* values
+   * This is a one-time migration to resolve NO-SKU items to their real products
+   *
+   * @returns Statistics about what was fixed
+   */
+  async fixExistingNoSkuItems(): Promise<{
+    totalNoSkuItems: number;
+    fixed: number;
+    notFound: number;
+    errors: string[];
+  }> {
+    console.log(`\n[SyncOrchestrator] ${'─'.repeat(50)}`);
+    console.log('[SyncOrchestrator] Starting NO-SKU item fix for existing orders...');
+    console.log(`[SyncOrchestrator] ${'─'.repeat(50)}`);
+
+    const result = {
+      totalNoSkuItems: 0,
+      fixed: 0,
+      notFound: 0,
+      errors: [] as string[],
+    };
+
+    try {
+      // Get channel info for clientId
+      const channel = await this.prisma.channel.findUnique({
+        where: { id: this.config.channelId },
+        select: { clientId: true },
+      });
+
+      if (!channel) {
+        throw new Error(`Channel ${this.config.channelId} not found`);
+      }
+
+      // Find all order items with NO-SKU-* for orders in this channel
+      const noSkuItems = await this.prisma.orderItem.findMany({
+        where: {
+          sku: { startsWith: 'NO-SKU-' },
+          order: {
+            channelId: this.config.channelId,
+          },
+        },
+        include: {
+          order: {
+            select: { id: true, orderNumber: true },
+          },
+        },
+      });
+
+      result.totalNoSkuItems = noSkuItems.length;
+      console.log(`[SyncOrchestrator] Found ${noSkuItems.length} order items with NO-SKU-* values`);
+
+      if (noSkuItems.length === 0) {
+        console.log('[SyncOrchestrator] No NO-SKU items to fix');
+        return result;
+      }
+
+      // Process each NO-SKU item
+      for (const item of noSkuItems) {
+        try {
+          // Skip if SKU is somehow null (shouldn't happen with our query but TypeScript requires this)
+          if (!item.sku) {
+            console.log(`[SyncOrchestrator] Skipping item ${item.id} - SKU is null`);
+            continue;
+          }
+
+          // Try to find the real product using fallback lookup
+          const fallbackProduct = await this.findProductByFallback(
+            item.sku,
+            item.productName || undefined,
+            channel.clientId
+          );
+
+          if (fallbackProduct) {
+            // Update the order item with the real SKU and product reference
+            await this.prisma.orderItem.update({
+              where: { id: item.id },
+              data: {
+                sku: fallbackProduct.sku,
+                productId: fallbackProduct.id,
+              },
+            });
+
+            console.log(`[SyncOrchestrator] ✅ Fixed order item: ${item.sku} -> ${fallbackProduct.sku} (Order: ${item.order.orderNumber})`);
+            result.fixed++;
+          } else {
+            console.log(`[SyncOrchestrator] ❌ Could not find product for: ${item.sku} (Order: ${item.order.orderNumber}, Name: "${item.productName}")`);
+            result.notFound++;
+          }
+        } catch (error: any) {
+          const errMsg = `Failed to fix item ${item.id} (${item.sku}): ${error.message}`;
+          console.error(`[SyncOrchestrator] ${errMsg}`);
+          result.errors.push(errMsg);
+        }
+      }
+
+      console.log(`\n[SyncOrchestrator] ${'─'.repeat(50)}`);
+      console.log(`[SyncOrchestrator] NO-SKU fix complete:`);
+      console.log(`[SyncOrchestrator]   Total NO-SKU items: ${result.totalNoSkuItems}`);
+      console.log(`[SyncOrchestrator]   Fixed: ${result.fixed}`);
+      console.log(`[SyncOrchestrator]   Not found: ${result.notFound}`);
+      console.log(`[SyncOrchestrator]   Errors: ${result.errors.length}`);
+      console.log(`[SyncOrchestrator] ${'─'.repeat(50)}\n`);
+
+      return result;
+    } catch (error: any) {
+      console.error('[SyncOrchestrator] NO-SKU fix failed:', error);
+      result.errors.push(error.message);
+      return result;
+    }
+  }
+
+  /**
+   * Find product by fallback methods when SKU is NO-SKU-*
+   *
+   * When Shopify orders don't include a SKU on the line item, we generate a fallback
+   * like NO-SKU-{variant_id}. This method tries to find the actual product by:
+   * 1. Extracting the variant_id from the NO-SKU string
+   * 2. Looking up the product via ProductChannel table (externalProductId = variant_id)
+   * 3. Optionally matching by product name if provided
+   *
+   * @param sku The SKU string (expected to be NO-SKU-{variant_id})
+   * @param productName Optional product name to match against
+   * @param clientId Optional client ID to filter products
+   * @returns The matched product or null
+   */
+  private async findProductByFallback(
+    sku: string,
+    productName?: string,
+    clientId?: string
+  ): Promise<{ id: string; sku: string; jtlProductId: string | null; name: string } | null> {
+    // Extract variant_id from NO-SKU-{variant_id}
+    const variantIdMatch = sku.match(/^NO-SKU-(\d+)$/);
+    if (!variantIdMatch) {
+      return null;
+    }
+
+    const variantId = variantIdMatch[1];
+    console.log(`[SyncOrchestrator] Attempting fallback product lookup for variant_id: ${variantId}, productName: "${productName}"`);
+
+    // Method 1: Try to find by ProductChannel.externalProductId (variant ID)
+    // This is the most reliable method as it matches the exact Shopify variant
+    const productChannel = await this.prisma.productChannel.findFirst({
+      where: {
+        channelId: this.config.channelId,
+        externalProductId: variantId,
+      },
+      include: {
+        product: true,
+      },
+    });
+
+    if (productChannel?.product) {
+      console.log(`[SyncOrchestrator] ✅ Found product by variant_id ${variantId}: SKU=${productChannel.product.sku}, name="${productChannel.product.name}"`);
+      return {
+        id: productChannel.product.id,
+        sku: productChannel.product.sku,
+        jtlProductId: productChannel.product.jtlProductId,
+        name: productChannel.product.name,
+      };
+    }
+
+    // Method 2: Try to find by product name (fuzzy match)
+    // This is less reliable but can catch cases where the variant ID mapping is missing
+    if (productName) {
+      // Build where clause
+      const whereClause: any = {
+        name: {
+          contains: productName.split(' ')[0], // Match on first word of product name
+          mode: 'insensitive',
+        },
+      };
+
+      // Add clientId filter if provided
+      if (clientId) {
+        whereClause.clientId = clientId;
+      }
+
+      const productByName = await this.prisma.product.findFirst({
+        where: whereClause,
+      });
+
+      if (productByName) {
+        console.log(`[SyncOrchestrator] ✅ Found product by name match: SKU=${productByName.sku}, name="${productByName.name}" (searched for: "${productName}")`);
+        return {
+          id: productByName.id,
+          sku: productByName.sku,
+          jtlProductId: productByName.jtlProductId,
+          name: productByName.name,
+        };
+      }
+    }
+
+    console.log(`[SyncOrchestrator] ❌ No product found for variant_id ${variantId} or name "${productName}"`);
+    return null;
   }
 }
 
