@@ -2105,7 +2105,7 @@ export class JTLService {
     const lastname = nameParts.slice(1).join(' ') || firstname;
 
     return {
-      merchantOutboundNumber: order.orderId,
+      merchantOutboundNumber: order.orderNumber || order.orderId,
       warehouseId: this.credentials.warehouseId,
       fulfillerId: this.credentials.fulfillerId,
       currency: order.currency || 'EUR',
