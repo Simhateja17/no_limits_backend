@@ -15,6 +15,8 @@ import { PrismaClient, SyncOrigin } from '@prisma/client';
 import { ProductSyncService } from './product-sync.service.js';
 import { JTLService } from './jtl.service.js';
 import { getEncryptionService } from '../encryption.service.js';
+import { Logger } from '../../utils/logger.js';
+import { generateJobId } from '../../utils/job-id.js';
 
 // ============= TYPES =============
 
@@ -43,6 +45,7 @@ export class SyncQueueProcessor {
   private options: QueueProcessorOptions;
   private isRunning: boolean = false;
   private intervalId: NodeJS.Timeout | null = null;
+  private logger = new Logger('SyncQueueProcessor');
   private metrics: ProcessorMetrics = {
     jobsProcessed: 0,
     jobsFailed: 0,
@@ -113,7 +116,14 @@ export class SyncQueueProcessor {
   private async processQueue(): Promise<void> {
     if (!this.isRunning) return;
 
+    const jobId = generateJobId('queue-batch');
     const startTime = Date.now();
+
+    this.logger.debug({
+      jobId,
+      event: 'batch_started',
+      operation: 'processQueue'
+    });
 
     try {
       // Get pending jobs
@@ -142,12 +152,17 @@ export class SyncQueueProcessor {
         },
       });
 
-      if (jobs.length === 0) return;
+      if (jobs.length > 0) {
+        this.logger.debug({
+          jobId,
+          event: 'product_jobs_found',
+          jobCount: jobs.length,
+          batchSize: this.options.batchSize
+        });
 
-      console.log(`[SyncQueueProcessor] Processing ${jobs.length} jobs`);
-
-      for (const job of jobs) {
-        await this.processJob(job);
+        for (const job of jobs) {
+          await this.processJob(job, jobId);
+        }
       }
 
       // Process order queue
@@ -180,9 +195,15 @@ export class SyncQueueProcessor {
       });
 
       if (orderJobs.length > 0) {
-        console.log(`[SyncQueueProcessor] Processing ${orderJobs.length} order jobs`);
+        this.logger.debug({
+          jobId,
+          event: 'order_jobs_found',
+          jobCount: orderJobs.length,
+          batchSize: this.options.batchSize
+        });
+
         for (const orderJob of orderJobs) {
-          await this.processOrderJob(orderJob);
+          await this.processOrderJob(orderJob, jobId);
         }
       }
 
@@ -190,8 +211,27 @@ export class SyncQueueProcessor {
       const processingTime = Date.now() - startTime;
       this.updateAvgProcessingTime(processingTime);
 
+      if (jobs.length > 0 || orderJobs.length > 0) {
+        this.logger.info({
+          jobId,
+          event: 'batch_completed',
+          operation: 'processQueue',
+          duration: processingTime,
+          productJobs: jobs.length,
+          orderJobs: orderJobs.length,
+          totalProcessed: jobs.length + orderJobs.length
+        });
+      }
+
     } catch (error) {
-      console.error('[SyncQueueProcessor] Queue processing error:', error);
+      this.logger.error({
+        jobId,
+        event: 'batch_failed',
+        operation: 'processQueue',
+        duration: Date.now() - startTime,
+        error: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined
+      });
     }
   }
 
@@ -236,8 +276,20 @@ export class SyncQueueProcessor {
         } | null;
       };
     };
-  }): Promise<void> {
+  }, parentJobId?: string): Promise<void> {
+    const queueJobId = parentJobId || generateJobId('queue-job');
     const jobStartTime = Date.now();
+
+    this.logger.debug({
+      jobId: queueJobId,
+      event: 'job_started',
+      operation: job.operation,
+      productId: job.productId,
+      productSku: job.product.sku,
+      queueJobId: job.id,
+      attempt: job.attempts + 1,
+      maxRetries: this.options.maxRetries
+    });
 
     try {
       // Mark as processing
@@ -281,29 +333,52 @@ export class SyncQueueProcessor {
           },
         });
         this.metrics.jobsProcessed++;
-        console.log(`[SyncQueueProcessor] Job ${job.id} completed successfully`);
+
+        this.logger.info({
+          jobId: queueJobId,
+          event: 'job_completed',
+          operation: job.operation,
+          productId: job.productId,
+          productSku: job.product.sku,
+          queueJobId: job.id,
+          duration: Date.now() - jobStartTime
+        });
       } else {
         throw new Error(error || 'Unknown error');
       }
 
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      console.error(`[SyncQueueProcessor] Job ${job.id} failed:`, errorMessage);
 
       // Calculate retry delay with exponential backoff
-      const retryDelay = this.options.retryDelayMs * 
+      const retryDelay = this.options.retryDelayMs *
         Math.pow(this.options.retryBackoffMultiplier, job.attempts);
 
       // Mark as failed or pending retry
       const newStatus = job.attempts >= this.options.maxRetries - 1 ? 'failed' : 'pending';
-      
+
+      this.logger.error({
+        jobId: queueJobId,
+        event: newStatus === 'failed' ? 'job_failed_permanently' : 'job_retry_scheduled',
+        operation: job.operation,
+        productId: job.productId,
+        productSku: job.product.sku,
+        queueJobId: job.id,
+        attempt: job.attempts + 1,
+        maxRetries: this.options.maxRetries,
+        retryDelayMs: newStatus === 'pending' ? retryDelay : undefined,
+        duration: Date.now() - jobStartTime,
+        error: errorMessage,
+        stack: error instanceof Error ? error.stack : undefined
+      });
+
       await this.prisma.productSyncQueue.update({
         where: { id: job.id },
         data: {
           status: newStatus,
           lastError: errorMessage,
-          scheduledFor: newStatus === 'pending' 
-            ? new Date(Date.now() + retryDelay) 
+          scheduledFor: newStatus === 'pending'
+            ? new Date(Date.now() + retryDelay)
             : undefined,
         },
       });
@@ -329,8 +404,19 @@ export class SyncQueueProcessor {
   /**
    * Process a single order sync job
    */
-  private async processOrderJob(job: any): Promise<void> {
+  private async processOrderJob(job: any, parentJobId?: string): Promise<void> {
+    const queueJobId = parentJobId || generateJobId('order-queue-job');
     const jobStartTime = Date.now();
+
+    this.logger.debug({
+      jobId: queueJobId,
+      event: 'order_job_started',
+      operation: job.operation,
+      orderId: job.orderId,
+      queueJobId: job.id,
+      attempt: job.attempts + 1,
+      maxRetries: this.options.maxRetries
+    });
 
     try {
       // Mark as processing
@@ -363,20 +449,41 @@ export class SyncQueueProcessor {
           },
         });
         this.metrics.jobsProcessed++;
-        console.log(`[OrderQueue] Job ${job.id} completed successfully`);
+
+        this.logger.info({
+          jobId: queueJobId,
+          event: 'order_job_completed',
+          operation: job.operation,
+          orderId: job.orderId,
+          queueJobId: job.id,
+          duration: Date.now() - jobStartTime
+        });
       } else {
         throw new Error(error || 'Unknown error');
       }
 
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      console.error(`[OrderQueue] Job ${job.id} failed:`, errorMessage);
 
       // Calculate retry delay
       const retryDelay = this.options.retryDelayMs *
         Math.pow(this.options.retryBackoffMultiplier, job.attempts);
 
       const newStatus = job.attempts >= this.options.maxRetries - 1 ? 'failed' : 'pending';
+
+      this.logger.error({
+        jobId: queueJobId,
+        event: newStatus === 'failed' ? 'order_job_failed_permanently' : 'order_job_retry_scheduled',
+        operation: job.operation,
+        orderId: job.orderId,
+        queueJobId: job.id,
+        attempt: job.attempts + 1,
+        maxRetries: this.options.maxRetries,
+        retryDelayMs: newStatus === 'pending' ? retryDelay : undefined,
+        duration: Date.now() - jobStartTime,
+        error: errorMessage,
+        stack: error instanceof Error ? error.stack : undefined
+      });
 
       await this.prisma.orderSyncQueue.update({
         where: { id: job.id },

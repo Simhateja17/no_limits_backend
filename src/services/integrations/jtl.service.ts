@@ -20,6 +20,8 @@ import {
 } from './types.js';
 import { PrismaClient } from '@prisma/client';
 import { getEncryptionService } from '../encryption.service.js';
+import { Logger } from '../../utils/logger.js';
+import { generateJobId } from '../../utils/job-id.js';
 
 interface JTLTokenResponse {
   access_token: string;
@@ -141,6 +143,7 @@ export class JTLService {
   // For token persistence after refresh
   private prisma?: PrismaClient;
   private internalClientId?: string;
+  private logger = new Logger('JTLService');
 
   // JTL FFN API base URLs
   private static readonly SANDBOX_URL = 'https://ffn-sbx.api.jtl-software.com/api';
@@ -296,17 +299,37 @@ export class JTLService {
   private async ensureValidToken(): Promise<void> {
     // If token is expired or will expire in 5 minutes, refresh it
     if (this.tokenExpiresAt && new Date() >= new Date(this.tokenExpiresAt.getTime() - 5 * 60 * 1000)) {
+      this.logger.debug({
+        event: 'token_refresh_needed',
+        expiresAt: this.tokenExpiresAt.toISOString(),
+        clientId: this.internalClientId
+      });
+
       // If we have prisma and clientId, persist the new tokens to database
       if (this.prisma && this.internalClientId) {
-        console.log('[JTL] Token expiring soon, refreshing and persisting to database...');
+        const startTime = Date.now();
         await this.refreshAndPersistToken(this.internalClientId, this.prisma);
+
+        this.logger.debug({
+          event: 'token_refresh_completed',
+          clientId: this.internalClientId,
+          duration: Date.now() - startTime,
+          persisted: true
+        });
       } else {
-        console.warn('[JTL] Token refreshed but NOT persisted - no prisma/clientId provided');
+        this.logger.warn({
+          event: 'token_refresh_not_persisted',
+          reason: 'no_prisma_or_clientId'
+        });
         await this.refreshAccessToken();
       }
     }
 
     if (!this.accessToken) {
+      this.logger.error({
+        event: 'token_missing',
+        error: 'No access token available'
+      });
       throw new Error('No access token available. Please authenticate first.');
     }
   }
@@ -316,13 +339,26 @@ export class JTLService {
    */
   private async request<T>(
     endpoint: string,
-    options: RequestInit = {}
+    options: RequestInit = {},
+    jobId?: string
   ): Promise<T> {
+    const requestJobId = jobId || generateJobId('jtl-req');
+    const startTime = Date.now();
+
     await this.ensureValidToken();
 
     const url = `${this.baseUrl}${endpoint}`;
+    const method = options.method || 'GET';
 
-    console.log(`[JTL Request] ${options.method || 'GET'} ${url}`);
+    this.logger.debug({
+      jobId: requestJobId,
+      event: 'api_request',
+      method,
+      url,
+      endpoint,
+      bodySize: options.body ? Buffer.byteLength(options.body as string) : 0,
+      clientId: this.internalClientId
+    });
 
     const response = await fetch(url, {
       ...options,
@@ -333,22 +369,53 @@ export class JTLService {
       },
     });
 
-    console.log(`[JTL Request] Response status: ${response.status}`);
+    const duration = Date.now() - startTime;
 
     if (!response.ok) {
       const error = await response.text();
-      console.error(`[JTL Request] Error response: ${error}`);
+
+      this.logger.error({
+        jobId: requestJobId,
+        event: 'api_error',
+        method,
+        url,
+        status: response.status,
+        duration,
+        error,
+        clientId: this.internalClientId
+      });
+
       throw new Error(`JTL API error: ${response.status} - ${error}`);
     }
 
     // Handle 204 No Content
     if (response.status === 204) {
-      console.log('[JTL Request] 204 No Content response');
+      this.logger.debug({
+        jobId: requestJobId,
+        event: 'api_response',
+        method,
+        url,
+        status: response.status,
+        duration,
+        responseType: 'no_content'
+      });
+
       return {} as T;
     }
 
     const data = await response.json() as T;
-    console.log(`[JTL Request] Response data keys:`, Object.keys(data as object));
+
+    this.logger.debug({
+      jobId: requestJobId,
+      event: 'api_response',
+      method,
+      url,
+      status: response.status,
+      duration,
+      responseSize: JSON.stringify(data).length,
+      itemCount: Array.isArray(data) ? data.length : (data && typeof data === 'object' && 'items' in data && Array.isArray((data as {items: unknown[]}).items)) ? (data as {items: unknown[]}).items.length : undefined
+    });
+
     return data;
   }
 

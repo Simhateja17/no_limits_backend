@@ -10,6 +10,8 @@ import { SyncResult } from './types.js';
 import { getEncryptionService } from '../encryption.service.js';
 import { JTLService } from './jtl.service.js';
 import { StockSyncService } from './stock-sync.service.js';
+import { Logger } from '../../utils/logger.js';
+import { generateJobId } from '../../utils/job-id.js';
 
 interface SchedulerConfig {
   /**
@@ -109,6 +111,7 @@ export class SyncScheduler {
   private inboundPollTimer?: NodeJS.Timeout;
   private stockSyncService: StockSyncService;
   private isRunning = false;
+  private logger = new Logger('SyncScheduler');
 
   private static readonly DEFAULT_CONFIG: SchedulerConfig = {
     incrementalSyncIntervalMinutes: 5,
@@ -322,13 +325,37 @@ export class SyncScheduler {
    * Run stock sync for all clients (periodic safety net)
    */
   async runStockSyncForAllClients(): Promise<void> {
-    console.log('[Scheduler] Starting periodic stock sync for all clients...');
+    const jobId = generateJobId('stock-sync');
+    const startTime = Date.now();
+
+    this.logger.debug({
+      jobId,
+      event: 'job_started',
+      operation: 'stockSync',
+      type: 'periodic_safety_net'
+    });
 
     try {
       const result = await this.stockSyncService.syncStockForAllClients();
-      console.log(`[Scheduler] Stock sync completed: ${result.clientsProcessed} clients, ${result.totalProductsUpdated} products updated, ${result.totalProductsFailed} failed`);
+
+      this.logger.info({
+        jobId,
+        event: 'job_completed',
+        operation: 'stockSync',
+        duration: Date.now() - startTime,
+        clientsProcessed: result.clientsProcessed,
+        productsUpdated: result.totalProductsUpdated,
+        productsFailed: result.totalProductsFailed
+      });
     } catch (error) {
-      console.error('[Scheduler] Stock sync failed:', error instanceof Error ? error.message : 'Unknown error');
+      this.logger.error({
+        jobId,
+        event: 'job_failed',
+        operation: 'stockSync',
+        duration: Date.now() - startTime,
+        error: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined
+      });
     }
   }
 
@@ -336,13 +363,37 @@ export class SyncScheduler {
    * Poll inbounds and sync stock when inbounds close
    */
   async pollInboundsAndSyncStock(): Promise<void> {
-    console.log('[Scheduler] Polling inbounds for stock changes...');
+    const jobId = generateJobId('inbound-poll');
+    const startTime = Date.now();
+
+    this.logger.debug({
+      jobId,
+      event: 'job_started',
+      operation: 'inboundPoll',
+      type: 'stock_change_detection'
+    });
 
     try {
       const result = await this.stockSyncService.pollInboundsAndSyncForAllClients();
-      console.log(`[Scheduler] Inbound polling completed: ${result.clientsProcessed} clients, ${result.totalInboundsProcessed} inbounds, ${result.stockSyncsTriggered} stock syncs triggered`);
+
+      this.logger.info({
+        jobId,
+        event: 'job_completed',
+        operation: 'inboundPoll',
+        duration: Date.now() - startTime,
+        clientsProcessed: result.clientsProcessed,
+        inboundsProcessed: result.totalInboundsProcessed,
+        stockSyncsTriggered: result.stockSyncsTriggered
+      });
     } catch (error) {
-      console.error('[Scheduler] Inbound polling failed:', error instanceof Error ? error.message : 'Unknown error');
+      this.logger.error({
+        jobId,
+        event: 'job_failed',
+        operation: 'inboundPoll',
+        duration: Date.now() - startTime,
+        error: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined
+      });
     }
   }
 
@@ -354,16 +405,47 @@ export class SyncScheduler {
     productsUpdated: number;
     errors: string[];
   }> {
-    console.log(`[Scheduler] Manual stock sync triggered for client ${clientId}`);
+    const jobId = generateJobId('stock-sync-manual');
+    const startTime = Date.now();
+
+    this.logger.debug({
+      jobId,
+      event: 'job_started',
+      operation: 'manualStockSync',
+      clientId,
+      type: 'manual_trigger'
+    });
 
     try {
       const result = await this.stockSyncService.syncStockForClient(clientId);
+
+      this.logger.info({
+        jobId,
+        event: 'job_completed',
+        operation: 'manualStockSync',
+        clientId,
+        duration: Date.now() - startTime,
+        success: result.success,
+        productsUpdated: result.productsUpdated,
+        errorCount: result.errors.length
+      });
+
       return {
         success: result.success,
         productsUpdated: result.productsUpdated,
         errors: result.errors,
       };
     } catch (error) {
+      this.logger.error({
+        jobId,
+        event: 'job_failed',
+        operation: 'manualStockSync',
+        clientId,
+        duration: Date.now() - startTime,
+        error: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined
+      });
+
       return {
         success: false,
         productsUpdated: 0,
@@ -376,28 +458,59 @@ export class SyncScheduler {
    * Proactively refresh all JTL tokens to prevent expiration
    */
   async refreshAllJTLTokens(): Promise<void> {
-    console.log('[Scheduler] Starting proactive JTL token refresh...');
+    const jobId = generateJobId('token-refresh');
+    const startTime = Date.now();
+
+    this.logger.debug({
+      jobId,
+      event: 'job_started',
+      operation: 'tokenRefresh',
+      type: 'proactive'
+    });
 
     const configs = await this.prisma.jtlConfig.findMany({
       where: { isActive: true },
     });
 
     if (configs.length === 0) {
-      console.log('[Scheduler] No active JTL configs found');
+      this.logger.warn({
+        jobId,
+        event: 'no_configs_found',
+        operation: 'tokenRefresh'
+      });
       return;
     }
+
+    this.logger.debug({
+      jobId,
+      event: 'configs_found',
+      configCount: configs.length
+    });
 
     const encryptionService = getEncryptionService();
     let success = 0;
     let failed = 0;
+    const skipped: string[] = [];
 
     for (const config of configs) {
       try {
         // Skip if no refresh token (can't refresh)
         if (!config.refreshToken) {
-          console.warn(`[TokenRefresh] Skipping client ${config.clientId_fk} - no refresh token`);
+          this.logger.warn({
+            jobId,
+            event: 'client_skipped',
+            clientId: config.clientId_fk,
+            reason: 'no_refresh_token'
+          });
+          skipped.push(config.clientId_fk);
           continue;
         }
+
+        this.logger.debug({
+          jobId,
+          event: 'token_refresh_started',
+          clientId: config.clientId_fk
+        });
 
         const jtlService = new JTLService({
           clientId: config.clientId,
@@ -411,37 +524,83 @@ export class SyncScheduler {
         }, this.prisma, config.clientId_fk);
 
         await jtlService.refreshAndPersistToken(config.clientId_fk, this.prisma);
-        console.log(`[TokenRefresh] ✓ Refreshed tokens for client ${config.clientId_fk}`);
+
+        this.logger.debug({
+          jobId,
+          event: 'token_refresh_success',
+          clientId: config.clientId_fk
+        });
         success++;
       } catch (error) {
-        console.error(`[TokenRefresh] ✗ Failed for client ${config.clientId_fk}:`, error instanceof Error ? error.message : 'Unknown error');
+        this.logger.error({
+          jobId,
+          event: 'token_refresh_failed',
+          clientId: config.clientId_fk,
+          error: error instanceof Error ? error.message : 'Unknown error',
+          stack: error instanceof Error ? error.stack : undefined
+        });
         failed++;
       }
     }
 
-    console.log(`[Scheduler] Token refresh complete: ${success} success, ${failed} failed`);
+    this.logger.info({
+      jobId,
+      event: 'job_completed',
+      operation: 'tokenRefresh',
+      duration: Date.now() - startTime,
+      totalConfigs: configs.length,
+      success,
+      failed,
+      skipped: skipped.length
+    });
   }
 
   /**
    * Run incremental sync for all channels
    */
   async runIncrementalSyncForAllChannels(): Promise<SyncJobResult[]> {
-    console.log('[Scheduler] Starting incremental sync for all channels...');
-    
+    const jobId = generateJobId('sync-inc');
+    const startTime = Date.now();
+
     const channels = await this.getActiveChannels();
+
+    this.logger.debug({
+      jobId,
+      event: 'job_started',
+      operation: 'incrementalSync',
+      channelCount: channels.length
+    });
+
     const results: SyncJobResult[] = [];
-    
+
     // Process channels in batches
     const batches = this.chunkArray(channels, this.config.maxConcurrentSyncs);
-    
+
     for (const batch of batches) {
       const batchResults = await Promise.all(
-        batch.map(channel => this.runIncrementalSyncForChannel(channel))
+        batch.map(channel => this.runIncrementalSyncForChannel(channel, jobId))
       );
       results.push(...batchResults);
     }
 
-    console.log(`[Scheduler] Incremental sync completed. ${results.filter(r => r.success).length}/${results.length} successful`);
+    const successCount = results.filter(r => r.success).length;
+    const totalProducts = results.reduce((sum, r) => sum + (r.productsResult?.itemsProcessed || 0), 0);
+    const totalOrders = results.reduce((sum, r) => sum + (r.ordersResult?.itemsProcessed || 0), 0);
+    const totalReturns = results.reduce((sum, r) => sum + (r.returnsResult?.itemsProcessed || 0), 0);
+
+    this.logger.info({
+      jobId,
+      event: 'job_completed',
+      operation: 'incrementalSync',
+      duration: Date.now() - startTime,
+      channelsProcessed: results.length,
+      channelsSuccess: successCount,
+      channelsFailed: results.length - successCount,
+      totalProducts,
+      totalOrders,
+      totalReturns
+    });
+
     return results;
   }
 
@@ -449,21 +608,47 @@ export class SyncScheduler {
    * Run full sync for all channels
    */
   async runFullSyncForAllChannels(): Promise<SyncJobResult[]> {
-    console.log('[Scheduler] Starting full sync for all channels...');
-    
+    const jobId = generateJobId('sync-full');
+    const startTime = Date.now();
+
     const channels = await this.getActiveChannels();
+
+    this.logger.debug({
+      jobId,
+      event: 'job_started',
+      operation: 'fullSync',
+      channelCount: channels.length
+    });
+
     const results: SyncJobResult[] = [];
-    
+
     const batches = this.chunkArray(channels, this.config.maxConcurrentSyncs);
-    
+
     for (const batch of batches) {
       const batchResults = await Promise.all(
-        batch.map(channel => this.runFullSyncForChannel(channel))
+        batch.map(channel => this.runFullSyncForChannel(channel, jobId))
       );
       results.push(...batchResults);
     }
 
-    console.log(`[Scheduler] Full sync completed. ${results.filter(r => r.success).length}/${results.length} successful`);
+    const successCount = results.filter(r => r.success).length;
+    const totalProducts = results.reduce((sum, r) => sum + (r.productsResult?.itemsProcessed || 0), 0);
+    const totalOrders = results.reduce((sum, r) => sum + (r.ordersResult?.itemsProcessed || 0), 0);
+    const totalReturns = results.reduce((sum, r) => sum + (r.returnsResult?.itemsProcessed || 0), 0);
+
+    this.logger.info({
+      jobId,
+      event: 'job_completed',
+      operation: 'fullSync',
+      duration: Date.now() - startTime,
+      channelsProcessed: results.length,
+      channelsSuccess: successCount,
+      channelsFailed: results.length - successCount,
+      totalProducts,
+      totalOrders,
+      totalReturns
+    });
+
     return results;
   }
 
@@ -471,32 +656,70 @@ export class SyncScheduler {
    * Poll JTL updates for all channels
    */
   async pollJtlUpdatesForAllChannels(): Promise<SyncJobResult[]> {
-    console.log('[Scheduler] Polling JTL updates for all channels...');
-    
+    const jobId = generateJobId('jtl-poll');
+    const startTime = Date.now();
+
     const channels = await this.getActiveChannels();
+
+    this.logger.debug({
+      jobId,
+      event: 'job_started',
+      operation: 'jtlPoll',
+      channelCount: channels.length
+    });
+
     const results: SyncJobResult[] = [];
-    
+
     const batches = this.chunkArray(channels, this.config.maxConcurrentSyncs);
-    
+
     for (const batch of batches) {
       const batchResults = await Promise.all(
-        batch.map(channel => this.pollJtlUpdatesForChannel(channel))
+        batch.map(channel => this.pollJtlUpdatesForChannel(channel, jobId))
       );
       results.push(...batchResults);
     }
 
-    console.log(`[Scheduler] JTL polling completed. ${results.filter(r => r.success).length}/${results.length} successful`);
+    const successCount = results.filter(r => r.success).length;
+    const totalItemsProcessed = results.reduce((sum, r) => sum + (r.jtlUpdatesResult?.itemsProcessed || 0), 0);
+
+    this.logger.info({
+      jobId,
+      event: 'job_completed',
+      operation: 'jtlPoll',
+      duration: Date.now() - startTime,
+      channelsProcessed: results.length,
+      channelsSuccess: successCount,
+      channelsFailed: results.length - successCount,
+      totalItemsProcessed
+    });
+
     return results;
   }
 
   /**
    * Run incremental sync for a single channel
    */
-  private async runIncrementalSyncForChannel(channel: ChannelWithConfig): Promise<SyncJobResult> {
+  private async runIncrementalSyncForChannel(channel: ChannelWithConfig, parentJobId?: string): Promise<SyncJobResult> {
     const startTime = Date.now();
+    const jobId = parentJobId || generateJobId('sync-inc-channel');
     const state = this.channelStates.get(channel.id);
-    
+
+    this.logger.debug({
+      jobId,
+      event: 'channel_sync_started',
+      operation: 'incrementalSync',
+      channelId: channel.id,
+      channelType: channel.type
+    });
+
     if (!state) {
+      this.logger.warn({
+        jobId,
+        event: 'channel_sync_failed',
+        channelId: channel.id,
+        error: 'Channel state not found'
+      });
+
       return {
         channelId: channel.id,
         success: false,
@@ -506,6 +729,13 @@ export class SyncScheduler {
     }
 
     if (state.isRunning) {
+      this.logger.warn({
+        jobId,
+        event: 'channel_sync_skipped',
+        channelId: channel.id,
+        reason: 'sync_already_in_progress'
+      });
+
       return {
         channelId: channel.id,
         success: false,
@@ -518,17 +748,35 @@ export class SyncScheduler {
 
     try {
       const orchestrator = this.createOrchestrator(channel);
-      
+
       if (!orchestrator) {
         throw new Error('Could not create sync orchestrator - missing credentials');
       }
 
       const since = state.lastIncrementalSync || new Date(Date.now() - 24 * 60 * 60 * 1000); // Default to 24h ago
-      
+
+      this.logger.debug({
+        jobId,
+        event: 'sync_execution_started',
+        channelId: channel.id,
+        since: since.toISOString()
+      });
+
       const result = await orchestrator.runIncrementalSync(since);
 
       state.lastIncrementalSync = new Date();
       state.lastError = undefined;
+
+      this.logger.debug({
+        jobId,
+        event: 'channel_sync_completed',
+        operation: 'incrementalSync',
+        channelId: channel.id,
+        duration: Date.now() - startTime,
+        productsProcessed: result.products?.itemsProcessed || 0,
+        ordersProcessed: result.orders?.itemsProcessed || 0,
+        returnsProcessed: result.returns?.itemsProcessed || 0
+      });
 
       return {
         channelId: channel.id,
@@ -542,9 +790,17 @@ export class SyncScheduler {
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       state.lastError = errorMessage;
-      
-      console.error(`[Scheduler] Incremental sync failed for channel ${channel.id}:`, errorMessage);
-      
+
+      this.logger.error({
+        jobId,
+        event: 'channel_sync_failed',
+        operation: 'incrementalSync',
+        channelId: channel.id,
+        duration: Date.now() - startTime,
+        error: errorMessage,
+        stack: error instanceof Error ? error.stack : undefined
+      });
+
       return {
         channelId: channel.id,
         success: false,
@@ -559,11 +815,27 @@ export class SyncScheduler {
   /**
    * Run full sync for a single channel
    */
-  private async runFullSyncForChannel(channel: ChannelWithConfig): Promise<SyncJobResult> {
+  private async runFullSyncForChannel(channel: ChannelWithConfig, parentJobId?: string): Promise<SyncJobResult> {
     const startTime = Date.now();
+    const jobId = parentJobId || generateJobId('sync-full-channel');
     const state = this.channelStates.get(channel.id);
-    
+
+    this.logger.debug({
+      jobId,
+      event: 'channel_sync_started',
+      operation: 'fullSync',
+      channelId: channel.id,
+      channelType: channel.type
+    });
+
     if (!state) {
+      this.logger.warn({
+        jobId,
+        event: 'channel_sync_failed',
+        channelId: channel.id,
+        error: 'Channel state not found'
+      });
+
       return {
         channelId: channel.id,
         success: false,
@@ -573,6 +845,13 @@ export class SyncScheduler {
     }
 
     if (state.isRunning) {
+      this.logger.warn({
+        jobId,
+        event: 'channel_sync_skipped',
+        channelId: channel.id,
+        reason: 'sync_already_in_progress'
+      });
+
       return {
         channelId: channel.id,
         success: false,
@@ -585,15 +864,32 @@ export class SyncScheduler {
 
     try {
       const orchestrator = this.createOrchestrator(channel);
-      
+
       if (!orchestrator) {
         throw new Error('Could not create sync orchestrator - missing credentials');
       }
+
+      this.logger.debug({
+        jobId,
+        event: 'sync_execution_started',
+        channelId: channel.id
+      });
 
       const result = await orchestrator.runFullSync();
 
       state.lastFullSync = new Date();
       state.lastError = undefined;
+
+      this.logger.debug({
+        jobId,
+        event: 'channel_sync_completed',
+        operation: 'fullSync',
+        channelId: channel.id,
+        duration: Date.now() - startTime,
+        productsProcessed: result.products?.itemsProcessed || 0,
+        ordersProcessed: result.orders?.itemsProcessed || 0,
+        returnsProcessed: result.returns?.itemsProcessed || 0
+      });
 
       return {
         channelId: channel.id,
@@ -606,9 +902,17 @@ export class SyncScheduler {
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       state.lastError = errorMessage;
-      
-      console.error(`[Scheduler] Full sync failed for channel ${channel.id}:`, errorMessage);
-      
+
+      this.logger.error({
+        jobId,
+        event: 'channel_sync_failed',
+        operation: 'fullSync',
+        channelId: channel.id,
+        duration: Date.now() - startTime,
+        error: errorMessage,
+        stack: error instanceof Error ? error.stack : undefined
+      });
+
       return {
         channelId: channel.id,
         success: false,
@@ -623,11 +927,27 @@ export class SyncScheduler {
   /**
    * Poll JTL updates for a single channel
    */
-  private async pollJtlUpdatesForChannel(channel: ChannelWithConfig): Promise<SyncJobResult> {
+  private async pollJtlUpdatesForChannel(channel: ChannelWithConfig, parentJobId?: string): Promise<SyncJobResult> {
     const startTime = Date.now();
+    const jobId = parentJobId || generateJobId('jtl-poll-channel');
     const state = this.channelStates.get(channel.id);
-    
+
+    this.logger.debug({
+      jobId,
+      event: 'channel_poll_started',
+      operation: 'jtlPoll',
+      channelId: channel.id,
+      channelType: channel.type
+    });
+
     if (!state) {
+      this.logger.warn({
+        jobId,
+        event: 'channel_poll_failed',
+        channelId: channel.id,
+        error: 'Channel state not found'
+      });
+
       return {
         channelId: channel.id,
         success: false,
@@ -638,17 +958,35 @@ export class SyncScheduler {
 
     try {
       const orchestrator = this.createOrchestrator(channel);
-      
+
       if (!orchestrator) {
         throw new Error('Could not create sync orchestrator - missing credentials');
       }
 
       const since = state.lastJtlPoll || new Date(Date.now() - 60 * 60 * 1000); // Default to 1h ago
-      
+
+      this.logger.debug({
+        jobId,
+        event: 'poll_execution_started',
+        channelId: channel.id,
+        since: since.toISOString()
+      });
+
       const outboundResult = await orchestrator.pollJTLOutboundUpdates(since);
       const returnResult = await orchestrator.pollJTLReturnUpdates(since);
 
       state.lastJtlPoll = new Date();
+
+      this.logger.debug({
+        jobId,
+        event: 'channel_poll_completed',
+        operation: 'jtlPoll',
+        channelId: channel.id,
+        duration: Date.now() - startTime,
+        outboundItemsProcessed: outboundResult.itemsProcessed,
+        returnItemsProcessed: returnResult.itemsProcessed,
+        totalItemsProcessed: outboundResult.itemsProcessed + returnResult.itemsProcessed
+      });
 
       return {
         channelId: channel.id,
@@ -663,9 +1001,17 @@ export class SyncScheduler {
       };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      
-      console.error(`[Scheduler] JTL polling failed for channel ${channel.id}:`, errorMessage);
-      
+
+      this.logger.error({
+        jobId,
+        event: 'channel_poll_failed',
+        operation: 'jtlPoll',
+        channelId: channel.id,
+        duration: Date.now() - startTime,
+        error: errorMessage,
+        stack: error instanceof Error ? error.stack : undefined
+      });
+
       return {
         channelId: channel.id,
         success: false,

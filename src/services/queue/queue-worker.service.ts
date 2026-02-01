@@ -27,6 +27,8 @@ import { OrderSyncService } from '../integrations/order-sync.service.js';
 import { ReturnSyncService } from '../integrations/return-sync.service.js';
 import { JTLOrderSyncService } from '../integrations/jtl-order-sync.service.js';
 import { ProductSyncService } from '../integrations/product-sync.service.js';
+import { Logger } from '../../utils/logger.js';
+import { generateJobId } from '../../utils/job-id.js';
 
 // ============= TYPES =============
 
@@ -56,6 +58,7 @@ export class QueueWorkerService {
     private productSyncService: ProductSyncService;
     private dlqEvents: DLQEvent[] = [];
     private isInitialized: boolean = false;
+    private logger = new Logger('QueueWorker');
 
     constructor(prisma: PrismaClient) {
         this.prisma = prisma;
@@ -70,11 +73,18 @@ export class QueueWorkerService {
      */
     async initialize(): Promise<void> {
         if (this.isInitialized) {
-            console.log('[QueueWorker] Already initialized');
+            this.logger.warn({
+                event: 'initialize_skipped',
+                reason: 'already_initialized'
+            });
             return;
         }
 
-        console.log('[QueueWorker] Initializing workers...');
+        const startTime = Date.now();
+        this.logger.debug({
+            event: 'initialize_started',
+            queueNames: Object.values(QUEUE_NAMES)
+        });
 
         const queue = getQueue();
 
@@ -84,7 +94,12 @@ export class QueueWorkerService {
         await this.registerReturnSyncWorkers(queue);
 
         this.isInitialized = true;
-        console.log('[QueueWorker] All workers initialized');
+
+        this.logger.info({
+            event: 'initialize_completed',
+            duration: Date.now() - startTime,
+            workersRegistered: Object.keys(QUEUE_NAMES).length
+        });
     }
 
     // ============= PRODUCT SYNC WORKERS =============
@@ -131,23 +146,56 @@ export class QueueWorkerService {
 
     private async handleProductSyncToShopify(data: ProductSyncJobData): Promise<JobResult> {
         const { productId, channelId, fieldsToSync } = data;
-        console.log(`[QueueWorker] Processing product sync to Shopify: ${productId}`);
+        const jobId = generateJobId('product-shopify');
+        const startTime = Date.now();
+
+        this.logger.debug({
+            jobId,
+            event: 'job_started',
+            operation: 'syncToShopify',
+            platform: 'shopify',
+            productId,
+            channelId,
+            fieldsToSync
+        });
 
         try {
             // Check if this is a stock-only sync
-            const isStockOnlySync = fieldsToSync && 
-                fieldsToSync.length > 0 && 
+            const isStockOnlySync = fieldsToSync &&
+                fieldsToSync.length > 0 &&
                 fieldsToSync.every(f => ['available', 'reserved'].includes(f));
 
             if (isStockOnlySync && channelId) {
-                // Use dedicated stock sync method for better reliability
-                console.log(`[QueueWorker] Using stock-only sync for Shopify`);
+                this.logger.debug({
+                    jobId,
+                    event: 'stock_only_sync',
+                    productId,
+                    channelId
+                });
+
                 const result = await this.productSyncService.syncStockToChannel(productId, channelId);
-                
+
                 if (!result.success) {
-                    console.error(`[QueueWorker] Stock sync to Shopify failed:`, result.error);
+                    this.logger.error({
+                        jobId,
+                        event: 'job_failed',
+                        operation: 'stockSync',
+                        platform: 'shopify',
+                        productId,
+                        duration: Date.now() - startTime,
+                        error: result.error
+                    });
                     return { success: false, error: result.error };
                 }
+
+                this.logger.info({
+                    jobId,
+                    event: 'job_completed',
+                    operation: 'stockSync',
+                    platform: 'shopify',
+                    productId,
+                    duration: Date.now() - startTime
+                });
 
                 return { success: true, details: { action: 'stock_updated' } };
             }
@@ -163,9 +211,28 @@ export class QueueWorkerService {
             );
 
             if (!result.success) {
-                console.error(`[QueueWorker] Product sync to Shopify failed:`, result.error);
+                this.logger.error({
+                    jobId,
+                    event: 'job_failed',
+                    operation: 'fullSync',
+                    platform: 'shopify',
+                    productId,
+                    duration: Date.now() - startTime,
+                    error: result.error
+                });
                 return { success: false, error: result.error };
             }
+
+            this.logger.info({
+                jobId,
+                event: 'job_completed',
+                operation: 'fullSync',
+                platform: 'shopify',
+                productId,
+                duration: Date.now() - startTime,
+                action: result.action,
+                syncedPlatforms: result.syncedPlatforms
+            });
 
             return {
                 success: true,
@@ -176,7 +243,17 @@ export class QueueWorkerService {
                 },
             };
         } catch (error: any) {
-            console.error(`[QueueWorker] Product sync to Shopify failed:`, error);
+            this.logger.error({
+                jobId,
+                event: 'job_exception',
+                operation: 'syncToShopify',
+                platform: 'shopify',
+                productId,
+                duration: Date.now() - startTime,
+                error: error.message,
+                stack: error.stack
+            });
+
             this.logDLQEvent('unknown', QUEUE_NAMES.PRODUCT_SYNC_TO_SHOPIFY, data, error.message, 0);
             return { success: false, error: error.message };
         }

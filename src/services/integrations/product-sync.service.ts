@@ -21,6 +21,8 @@ import { WooCommerceService } from './woocommerce.service.js';
 import { JTLService } from './jtl.service.js';
 import { getEncryptionService } from '../encryption.service.js';
 import crypto from 'crypto';
+import { Logger } from '../../utils/logger.js';
+import { generateJobId } from '../../utils/job-id.js';
 
 type Decimal = Prisma.Decimal;
 
@@ -180,6 +182,7 @@ interface ChannelWithCredentials {
 export class ProductSyncService {
   private prisma: PrismaClient;
   private conflictWindowMinutes: number = 5; // Time window for conflict detection
+  private logger = new Logger('ProductSync');
 
   constructor(prisma: PrismaClient) {
     this.prisma = prisma;
@@ -199,13 +202,29 @@ export class ProductSyncService {
     webhookEventId?: string
   ): Promise<ProductSyncResult> {
     const externalId = data.externalId;
-    
-    console.log(`[ProductSync] Processing incoming ${origin} product: ${externalId}`);
-    
+    const jobId = generateJobId('product-incoming');
+    const startTime = Date.now();
+
+    this.logger.debug({
+      jobId,
+      event: 'incoming_product_started',
+      origin,
+      externalId,
+      sku: data.sku,
+      channelId
+    });
+
     try {
       // 1. Check if this is an echo of our own update (loop prevention)
       if (await this.isEchoFromOurUpdate(data.externalId, origin, channelId)) {
-        console.log(`[ProductSync] Skipping echo from our own update: ${externalId}`);
+        this.logger.debug({
+          jobId,
+          event: 'echo_detected',
+          origin,
+          externalId,
+          reason: 'Skipping our own update'
+        });
+
         return {
           success: true,
           action: 'skipped',
@@ -222,6 +241,14 @@ export class ProductSyncService {
         data.sku
       );
 
+      this.logger.debug({
+        jobId,
+        event: 'product_lookup',
+        found: !!existingProduct,
+        productId: existingProduct?.id,
+        sku: existingProduct?.sku
+      });
+
       // 3. Prepare field updates respecting ownership
       const { updates, conflicts } = this.prepareFieldUpdates(
         existingProduct,
@@ -231,8 +258,14 @@ export class ProductSyncService {
 
       // 4. Handle conflicts if any
       if (conflicts.length > 0) {
-        console.log(`[ProductSync] Conflicts detected for ${externalId}:`, conflicts);
-        // For now, auto-resolve based on rules. Could queue for manual review.
+        this.logger.warn({
+          jobId,
+          event: 'conflicts_detected',
+          externalId,
+          conflictCount: conflicts.length,
+          conflicts: conflicts.map(c => ({ field: c.field, resolution: c.resolution }))
+        });
+
         const hasUnresolved = conflicts.some(c => c.resolution === 'manual');
         if (hasUnresolved) {
           return {
@@ -250,6 +283,14 @@ export class ProductSyncService {
 
       if (existingProduct) {
         // Update existing product
+        this.logger.debug({
+          jobId,
+          event: 'updating_product',
+          productId: existingProduct.id,
+          sku: existingProduct.sku,
+          fieldsUpdating: Object.keys(updates)
+        });
+
         product = await this.prisma.product.update({
           where: { id: existingProduct.id },
           data: {
@@ -273,10 +314,28 @@ export class ProductSyncService {
             updatedAt: new Date(),
           },
         });
+
+        this.logger.info({
+          jobId,
+          event: 'product_updated',
+          productId: product.id,
+          sku: existingProduct.sku,
+          origin,
+          fieldsUpdated: Object.keys(updates).length,
+          duration: Date.now() - startTime
+        });
       } else {
         // Create new product
         const sku = data.sku || `${origin.toUpperCase()}-${externalId}`;
-        
+
+        this.logger.debug({
+          jobId,
+          event: 'creating_product',
+          sku,
+          name: data.name,
+          origin
+        });
+
         product = await this.prisma.product.create({
           data: {
             clientId,
@@ -314,6 +373,16 @@ export class ProductSyncService {
           },
         });
         action = 'created';
+
+        this.logger.info({
+          jobId,
+          event: 'product_created',
+          productId: product.id,
+          sku,
+          name: data.name,
+          origin,
+          duration: Date.now() - startTime
+        });
       }
 
       // 5. Log the sync operation
@@ -328,6 +397,14 @@ export class ProductSyncService {
       });
 
       // 6. Queue sync to other platforms
+      this.logger.debug({
+        jobId,
+        event: 'queuing_sync',
+        productId: product.id,
+        fromOrigin: origin,
+        action: 'sync_to_other_platforms'
+      });
+
       await this.queueSyncToOtherPlatforms(product.id, origin, webhookEventId);
 
       return {
@@ -338,7 +415,16 @@ export class ProductSyncService {
         conflicts: conflicts.length > 0 ? conflicts : undefined,
       };
     } catch (error) {
-      console.error(`[ProductSync] Error processing incoming product:`, error);
+      this.logger.error({
+        jobId,
+        event: 'incoming_product_failed',
+        origin,
+        externalId,
+        duration: Date.now() - startTime,
+        error: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined
+      });
+
       return {
         success: false,
         action: 'failed',
@@ -449,7 +535,17 @@ export class ProductSyncService {
       fieldsToSync?: string[];
     } = {}
   ): Promise<ProductSyncResult> {
-    console.log(`[ProductSync] Pushing product ${productId} to all platforms`);
+    const jobId = generateJobId('product-push');
+    const startTime = Date.now();
+
+    this.logger.debug({
+      jobId,
+      event: 'push_started',
+      productId,
+      origin,
+      skipPlatforms: options.skipPlatforms,
+      fieldsToSync: options.fieldsToSync
+    });
 
     // Fetch product with all necessary fields for sync
     // Note: Using include without select automatically includes all scalar fields
@@ -467,9 +563,13 @@ export class ProductSyncService {
       },
     });
 
-    console.log(`[ProductSync] Fetched product ${productId}, jtlProductId: ${(product as any)?.jtlProductId || 'NULL'}`);
-
     if (!product) {
+      this.logger.warn({
+        jobId,
+        event: 'product_not_found',
+        productId
+      });
+
       return {
         success: false,
         action: 'failed',
@@ -478,17 +578,47 @@ export class ProductSyncService {
       };
     }
 
+    this.logger.debug({
+      jobId,
+      event: 'product_loaded',
+      productId,
+      sku: product.sku,
+      name: product.name,
+      channelsCount: product.channels.length,
+      hasJTLConfig: !!product.client.jtlConfig,
+      jtlProductId: product.jtlProductId
+    });
+
     const results: { platform: string; success: boolean; externalId?: string; error?: string }[] = [];
     const skipPlatforms = options.skipPlatforms || [];
 
     // Push to each linked channel
     for (const productChannel of product.channels) {
       const channelType = productChannel.channel.type.toLowerCase() as SyncOriginType;
-      
+      const channelStartTime = Date.now();
+
       if (skipPlatforms.includes(channelType)) {
+        this.logger.debug({
+          jobId,
+          event: 'platform_skipped',
+          platform: channelType,
+          reason: 'in_skip_list',
+          productId,
+          sku: product.sku
+        });
+
         results.push({ platform: channelType, success: true, externalId: productChannel.externalProductId || undefined });
         continue;
       }
+
+      this.logger.debug({
+        jobId,
+        event: 'syncing_to_platform',
+        platform: channelType,
+        productId,
+        sku: product.sku,
+        externalId: productChannel.externalProductId
+      });
 
       try {
         let externalId: string | undefined;
@@ -510,10 +640,29 @@ export class ProductSyncService {
           },
         });
 
+        this.logger.info({
+          jobId,
+          event: 'platform_sync_success',
+          platform: channelType,
+          productId,
+          sku: product.sku,
+          externalId,
+          duration: Date.now() - channelStartTime
+        });
+
         results.push({ platform: channelType, success: true, externalId });
       } catch (error) {
-        console.error(`[ProductSync] Error pushing to ${channelType}:`, error);
-        
+        this.logger.error({
+          jobId,
+          event: 'platform_sync_failed',
+          platform: channelType,
+          productId,
+          sku: product.sku,
+          duration: Date.now() - channelStartTime,
+          error: error instanceof Error ? error.message : 'Unknown error',
+          stack: error instanceof Error ? error.stack : undefined
+        });
+
         await this.prisma.productChannel.update({
           where: { id: productChannel.id },
           data: {
@@ -533,10 +682,19 @@ export class ProductSyncService {
 
     // Push to JTL if configured and not skipped
     if (product.client.jtlConfig && !skipPlatforms.includes('jtl')) {
-      try {
-        // Log the product's current jtlProductId for debugging
-        console.log(`[ProductSync] Product ${product.sku} has jtlProductId: ${product.jtlProductId || 'NULL'}, syncStatus: ${product.jtlSyncStatus || 'NULL'}`);
+      const jtlStartTime = Date.now();
 
+      this.logger.debug({
+        jobId,
+        event: 'syncing_to_platform',
+        platform: 'jtl',
+        productId,
+        sku: product.sku,
+        currentJtlId: product.jtlProductId,
+        jtlSyncStatus: product.jtlSyncStatus
+      });
+
+      try {
         const jtlId = await this.pushToJTL(product, product.client.jtlConfig, options.fieldsToSync);
 
         await this.prisma.product.update({
@@ -548,10 +706,29 @@ export class ProductSyncService {
           },
         });
 
+        this.logger.info({
+          jobId,
+          event: 'platform_sync_success',
+          platform: 'jtl',
+          productId,
+          sku: product.sku,
+          jtlProductId: jtlId,
+          duration: Date.now() - jtlStartTime
+        });
+
         results.push({ platform: 'jtl', success: true, externalId: jtlId });
       } catch (error) {
-        console.error(`[ProductSync] Error pushing to JTL:`, error);
-        
+        this.logger.error({
+          jobId,
+          event: 'platform_sync_failed',
+          platform: 'jtl',
+          productId,
+          sku: product.sku,
+          duration: Date.now() - jtlStartTime,
+          error: error instanceof Error ? error.message : 'Unknown error',
+          stack: error instanceof Error ? error.stack : undefined
+        });
+
         await this.prisma.product.update({
           where: { id: productId },
           data: { jtlSyncStatus: 'ERROR' },
@@ -583,6 +760,22 @@ export class ProductSyncService {
       targetPlatform: 'all',
       changedFields: options.fieldsToSync || [],
       success: allSuccess,
+    });
+
+    const successCount = results.filter(r => r.success).length;
+    const failedCount = results.filter(r => !r.success).length;
+
+    this.logger.info({
+      jobId,
+      event: 'push_completed',
+      productId,
+      sku: product.sku,
+      duration: Date.now() - startTime,
+      totalPlatforms: results.length,
+      successCount,
+      failedCount,
+      allSuccess,
+      platforms: results.map(r => ({ platform: r.platform, success: r.success }))
     });
 
     return {

@@ -15,6 +15,8 @@
 import { PrismaClient } from '@prisma/client';
 import { JTLService } from './integrations/jtl.service.js';
 import { getEncryptionService } from './encryption.service.js';
+import { Logger } from '../utils/logger.js';
+import { generateJobId } from '../utils/job-id.js';
 
 // Status mappings between platforms
 const JTL_TO_NOLIMITS_STATUS: Record<string, string> = {
@@ -57,6 +59,7 @@ export class FulfillmentSyncService {
   private prisma: PrismaClient;
   private pollInterval: NodeJS.Timeout | null = null;
   private isPolling: boolean = false;
+  private logger = new Logger('FulfillmentSync');
 
   constructor(prisma: PrismaClient) {
     this.prisma = prisma;
@@ -98,6 +101,9 @@ export class FulfillmentSyncService {
    * Uses priority levels to effectively hold/release orders
    */
   async syncHoldToJTL(orderId: string): Promise<SyncResult> {
+    const jobId = generateJobId('hold-sync');
+    const startTime = Date.now();
+
     const result: SyncResult = {
       success: false,
       orderId,
@@ -105,28 +111,62 @@ export class FulfillmentSyncService {
       errors: [],
     };
 
+    this.logger.debug({
+      jobId,
+      event: 'sync_started',
+      operation: 'syncHoldToJTL',
+      orderId
+    });
+
     try {
       const order = await this.prisma.order.findUnique({
         where: { id: orderId },
       });
 
       if (!order) {
+        this.logger.warn({
+          jobId,
+          event: 'sync_failed',
+          orderId,
+          error: 'Order not found'
+        });
         result.errors.push('Order not found');
         return result;
       }
 
       if (!order.jtlOutboundId || !order.clientId) {
+        this.logger.warn({
+          jobId,
+          event: 'sync_skipped',
+          orderId,
+          reason: 'not_synced_to_jtl'
+        });
         result.errors.push('Order not synced to JTL FFN');
         return result;
       }
 
       const jtlService = await this.getJTLService(order.clientId);
       if (!jtlService) {
+        this.logger.error({
+          jobId,
+          event: 'sync_failed',
+          orderId,
+          error: 'JTL FFN not configured'
+        });
         result.errors.push('JTL FFN not configured');
         return result;
       }
 
       if (order.isOnHold) {
+        this.logger.debug({
+          jobId,
+          event: 'hold_operation',
+          action: 'hold',
+          orderId,
+          jtlOutboundId: order.jtlOutboundId,
+          holdReason: order.holdReason
+        });
+
         // Place on hold
         const holdResult = await jtlService.holdOutbound(
           order.jtlOutboundId,
@@ -140,6 +180,15 @@ export class FulfillmentSyncService {
           result.syncedTo.push('jtl');
         }
       } else {
+        this.logger.debug({
+          jobId,
+          event: 'hold_operation',
+          action: 'release',
+          orderId,
+          jtlOutboundId: order.jtlOutboundId,
+          priorityLevel: order.priorityLevel
+        });
+
         // Release from hold
         const releaseResult = await jtlService.releaseOutbound(
           order.jtlOutboundId,
@@ -167,8 +216,29 @@ export class FulfillmentSyncService {
       });
 
       result.success = result.errors.length === 0;
+
+      this.logger.info({
+        jobId,
+        event: 'sync_completed',
+        operation: 'syncHoldToJTL',
+        orderId,
+        duration: Date.now() - startTime,
+        success: result.success,
+        action: order.isOnHold ? 'hold' : 'release'
+      });
+
       return result;
     } catch (error: any) {
+      this.logger.error({
+        jobId,
+        event: 'sync_failed',
+        operation: 'syncHoldToJTL',
+        orderId,
+        duration: Date.now() - startTime,
+        error: error.message,
+        stack: error.stack
+      });
+
       result.errors.push(error.message);
       return result;
     }
