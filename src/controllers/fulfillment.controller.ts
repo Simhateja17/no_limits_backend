@@ -120,7 +120,7 @@ export const getDashboardStats = async (req: Request, res: Response): Promise<vo
         where: {
           ...clientFilter,
           isCancelled: false,
-          fulfillmentState: { in: ['PENDING', 'AWAITING_STOCK'] },
+          fulfillmentState: { in: ['PENDING', 'PREPARATION'] },
           isOnHold: false,
         },
       }),
@@ -129,7 +129,7 @@ export const getDashboardStats = async (req: Request, res: Response): Promise<vo
         where: {
           ...clientFilter,
           isCancelled: false,
-          fulfillmentState: { in: ['READY_FOR_PICKING', 'PICKING', 'PACKING'] },
+          fulfillmentState: { in: ['ACKNOWLEDGED', 'LOCKED', 'PICKPROCESS'] },
         },
       }),
       // On hold

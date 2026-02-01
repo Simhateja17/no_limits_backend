@@ -89,7 +89,7 @@ const PIPELINE_STEPS = [
   {
     stepNumber: 4,
     stepName: 'sync_order_statuses',
-    stepDescription: 'Syncing order statuses from JTL FFN',
+    stepDescription: 'Syncing order statuses from JTL FFN and pushing orphaned orders',
   },
   {
     stepNumber: 5,
@@ -708,8 +708,11 @@ export class InitialSyncPipelineService {
       };
     };
   }): Promise<{ success: boolean; itemsProcessed?: number; itemsFailed?: number; error?: string }> {
-    console.log('[SyncPipeline] Step 4: Syncing order statuses from JTL FFN');
-    console.log(`[SyncPipeline] This step links JTL outbounds to local orders and syncs fulfillment statuses`);
+    console.log('[SyncPipeline] Step 4: Syncing order statuses from JTL FFN and pushing orphaned orders');
+    console.log(`[SyncPipeline] Sub-steps:`);
+    console.log(`[SyncPipeline]   4a: Link JTL outbounds to local orders`);
+    console.log(`[SyncPipeline]   4b: Poll JTL for status updates`);
+    console.log(`[SyncPipeline]   4c: Push orphaned orders to JTL FFN`);
     console.log(`[SyncPipeline] Channel ID: ${pipeline.channelId}`);
 
     const { channel, channelId } = pipeline;
@@ -787,8 +790,23 @@ export class InitialSyncPipelineService {
     console.log(`[SyncPipeline]   📊 Status updates processed: ${result.itemsProcessed}`);
     console.log(`[SyncPipeline]   ❌ Failed: ${result.itemsFailed}`);
 
-    const totalProcessed = linkResult.linked + result.itemsProcessed;
-    const totalFailed = linkResult.errors.length + result.itemsFailed;
+    // Step 4c: Push orphaned orders to JTL FFN
+    // These are orders pulled from Shopify/WooCommerce that don't exist in JTL yet
+    console.log(`[SyncPipeline] Step 4c: Pushing orphaned orders to JTL FFN...`);
+    console.log(`[SyncPipeline] This queues eligible orders without jtlOutboundId for FFN sync`);
+    const pushResult = await orchestrator.pushOrphanedOrdersToJTL();
+    console.log(`[SyncPipeline] Step 4c Results:`);
+    console.log(`[SyncPipeline]   📤 Queued for FFN sync: ${pushResult.queued}`);
+    console.log(`[SyncPipeline]   ⏭️  Skipped (already linked): ${pushResult.skippedAlreadyLinked}`);
+    console.log(`[SyncPipeline]   ❌ Skipped (cancelled): ${pushResult.skippedCancelled}`);
+    console.log(`[SyncPipeline]   ⏸️  Skipped (on hold): ${pushResult.skippedOnHold}`);
+    console.log(`[SyncPipeline]   📦 Skipped (no product mapping): ${pushResult.skippedNoProductMapping}`);
+    if (pushResult.errors.length > 0) {
+      console.log(`[SyncPipeline]   ⚠️  Errors: ${pushResult.errors.length}`);
+    }
+
+    const totalProcessed = linkResult.linked + result.itemsProcessed + pushResult.queued;
+    const totalFailed = linkResult.errors.length + result.itemsFailed + pushResult.errors.length;
 
     console.log(`[SyncPipeline] Step 4 Total: ${totalProcessed} processed, ${totalFailed} failed`);
 

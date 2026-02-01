@@ -14,6 +14,7 @@ import { JTLService } from './jtl.service.js';
 import { getEncryptionService } from '../encryption.service.js';
 import BatchOperations from './batch-utils.js';
 import ProductCache from './product-cache.js';
+import { getQueue, QUEUE_NAMES, OrderSyncJobData } from '../queue/sync-queue.service.js';
 import {
   ShopifyOrder,
   ShopifyProduct,
@@ -1266,6 +1267,273 @@ export class SyncOrchestrator {
       console.error(`[JTL] ${errMsg}`);
       errors.push(errMsg);
       return { linked, alreadyLinked, notFound, errors };
+    }
+  }
+
+  /**
+   * Push orphaned orders (orders without jtlOutboundId) to JTL FFN
+   *
+   * This method finds orders that were pulled from Shopify/WooCommerce but never
+   * pushed to JTL FFN, and queues them for sync.
+   *
+   * Order Eligibility Criteria:
+   * - Has no jtlOutboundId (not already linked to JTL)
+   * - isCancelled = false
+   * - isOnHold = false (or holdReason not in AWAITING_PAYMENT, SHIPPING_METHOD_MISMATCH)
+   * - Has at least one item with a jtlProductId (product mapping exists)
+   *
+   * @returns Statistics about queued, skipped, and errored orders
+   */
+  async pushOrphanedOrdersToJTL(): Promise<{
+    queued: number;
+    skippedAlreadyLinked: number;
+    skippedCancelled: number;
+    skippedOnHold: number;
+    skippedNoProductMapping: number;
+    errors: string[];
+  }> {
+    console.log(`\n[JTL] ${'─'.repeat(50)}`);
+    console.log('[JTL] Starting orphaned orders push to JTL FFN...');
+    console.log(`[JTL] ${'─'.repeat(50)}`);
+
+    const result = {
+      queued: 0,
+      skippedAlreadyLinked: 0,
+      skippedCancelled: 0,
+      skippedOnHold: 0,
+      skippedNoProductMapping: 0,
+      errors: [] as string[],
+    };
+
+    try {
+      // Find orders for this channel that don't have a jtlOutboundId
+      const orphanedOrders = await this.prisma.order.findMany({
+        where: {
+          channelId: this.config.channelId,
+          jtlOutboundId: null,
+        },
+        include: {
+          items: {
+            include: {
+              product: {
+                select: {
+                  id: true,
+                  jtlProductId: true,
+                },
+              },
+            },
+          },
+        },
+      });
+
+      console.log(`[JTL] Found ${orphanedOrders.length} orders without JTL outbound link`);
+
+      if (orphanedOrders.length === 0) {
+        console.log('[JTL] No orphaned orders to process');
+        return result;
+      }
+
+      // Process each orphaned order
+      for (const order of orphanedOrders) {
+        try {
+          // Check eligibility criteria
+
+          // 1. Skip if already has jtlOutboundId (shouldn't happen due to query, but be safe)
+          if (order.jtlOutboundId) {
+            result.skippedAlreadyLinked++;
+            continue;
+          }
+
+          // 2. Skip cancelled orders
+          if (order.isCancelled) {
+            console.log(`[JTL] Skipping cancelled order ${order.orderNumber}`);
+            result.skippedCancelled++;
+            continue;
+          }
+
+          // 3. Skip orders on hold with specific reasons
+          if (order.isOnHold) {
+            const holdReason = order.holdReason;
+            // Skip if on payment hold or shipping method mismatch
+            if (holdReason === 'AWAITING_PAYMENT' || holdReason === 'SHIPPING_METHOD_MISMATCH') {
+              console.log(`[JTL] Skipping on-hold order ${order.orderNumber} (reason: ${holdReason})`);
+              result.skippedOnHold++;
+              continue;
+            }
+            // Other hold reasons may still be eligible - admin put them on hold for review
+            // but once reviewed they can be synced
+          }
+
+          // 4. Check if at least one item has a JTL product mapping
+          const hasProductMapping = order.items.some(
+            (item) => item.product?.jtlProductId
+          );
+
+          if (!hasProductMapping) {
+            console.log(`[JTL] Skipping order ${order.orderNumber} - no items have JTL product mapping`);
+            result.skippedNoProductMapping++;
+            continue;
+          }
+
+          // Order is eligible - queue for FFN sync
+          const queueResult = await this.queueOrderForFfnSync(order.id, order.orderNumber || order.orderId);
+
+          if (queueResult.success) {
+            result.queued++;
+          } else {
+            result.errors.push(`Order ${order.orderNumber}: ${queueResult.error}`);
+          }
+        } catch (error: any) {
+          const errMsg = `Failed to process order ${order.orderNumber || order.id}: ${error.message}`;
+          console.error(`[JTL] ${errMsg}`);
+          result.errors.push(errMsg);
+        }
+      }
+
+      console.log(`\n[JTL] ${'─'.repeat(50)}`);
+      console.log(`[JTL] Orphaned orders push complete:`);
+      console.log(`[JTL]   ✅ Queued for FFN sync: ${result.queued}`);
+      console.log(`[JTL]   ⏭️  Skipped (already linked): ${result.skippedAlreadyLinked}`);
+      console.log(`[JTL]   ❌ Skipped (cancelled): ${result.skippedCancelled}`);
+      console.log(`[JTL]   ⏸️  Skipped (on hold): ${result.skippedOnHold}`);
+      console.log(`[JTL]   📦 Skipped (no product mapping): ${result.skippedNoProductMapping}`);
+      console.log(`[JTL]   ⚠️  Errors: ${result.errors.length}`);
+      console.log(`[JTL] ${'─'.repeat(50)}\n`);
+
+      return result;
+    } catch (error: any) {
+      console.error('[JTL] Orphaned orders push failed:', error);
+      result.errors.push(error.message);
+      return result;
+    }
+  }
+
+  /**
+   * Queue an order for FFN sync via pg-boss queue
+   *
+   * @param orderId The order ID to queue
+   * @param orderIdentifier Human-readable order identifier for logging
+   * @returns Success status and any error message
+   */
+  private async queueOrderForFfnSync(
+    orderId: string,
+    orderIdentifier: string
+  ): Promise<{ success: boolean; error?: string }> {
+    try {
+      // Get the queue instance
+      let queue;
+      try {
+        queue = getQueue();
+      } catch (queueError) {
+        // Queue not initialized - fall back to direct sync
+        console.log(`[JTL] Queue not available, attempting direct sync for order ${orderIdentifier}`);
+        return await this.directSyncOrderToFfn(orderId, orderIdentifier);
+      }
+
+      // Prepare job data
+      const jobData: OrderSyncJobData = {
+        orderId,
+        origin: 'nolimits',
+        operation: 'create',
+      };
+
+      // Enqueue with deduplication key to prevent duplicate jobs
+      const jobId = await queue.enqueue(
+        QUEUE_NAMES.ORDER_SYNC_TO_FFN,
+        jobData,
+        {
+          singletonKey: `ffn-sync-${orderId}`, // Prevent duplicate jobs for same order
+          retryLimit: 3,
+          retryDelay: 60,
+          retryBackoff: true,
+        }
+      );
+
+      if (jobId) {
+        console.log(`[JTL] Queued order ${orderIdentifier} for FFN sync (job: ${jobId})`);
+
+        // Update order sync status to PENDING
+        await this.prisma.order.update({
+          where: { id: orderId },
+          data: {
+            syncStatus: 'PENDING',
+          },
+        });
+
+        return { success: true };
+      } else {
+        // Job wasn't created (might be duplicate due to singletonKey)
+        console.log(`[JTL] Order ${orderIdentifier} already queued or duplicate prevented`);
+        return { success: true }; // Still consider this success - job exists
+      }
+    } catch (error: any) {
+      console.error(`[JTL] Failed to queue order ${orderIdentifier}:`, error.message);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Fallback: Direct sync order to FFN when queue is not available
+   * This is a simplified version that just pushes the order directly
+   */
+  private async directSyncOrderToFfn(
+    orderId: string,
+    orderIdentifier: string
+  ): Promise<{ success: boolean; error?: string }> {
+    try {
+      // Get the order with items
+      const order = await this.prisma.order.findUnique({
+        where: { id: orderId },
+        include: {
+          items: {
+            include: {
+              product: {
+                select: { jtlProductId: true },
+              },
+            },
+          },
+        },
+      });
+
+      if (!order) {
+        return { success: false, error: 'Order not found' };
+      }
+
+      // Build order data for pushOrderToJTL
+      const orderData: OrderSyncData & { status: OrderStatus } = {
+        localOrderId: order.id,
+        externalOrderId: order.externalOrderId || '',
+        orderNumber: order.orderNumber || order.orderId,
+        items: order.items.map((item) => ({
+          sku: item.sku || '',
+          productName: item.productName || undefined,
+          quantity: item.quantity,
+          unitPrice: item.unitPrice ? Number(item.unitPrice) : undefined,
+          jtlJfsku: item.product?.jtlProductId || undefined,
+        })),
+        shippingAddress: {
+          firstname: order.shippingFirstName || '',
+          lastname: order.shippingLastName || '',
+          company: order.shippingCompany || undefined,
+          street: order.shippingAddress1 || '',
+          zip: order.shippingZip || '',
+          city: order.shippingCity || '',
+          country: order.shippingCountry || '',
+          email: order.customerEmail || undefined,
+          phone: order.customerPhone || undefined,
+        },
+        customerEmail: order.customerEmail || undefined,
+        status: order.status,
+      };
+
+      // Push to JTL
+      await this.pushOrderToJTL(orderData);
+
+      console.log(`[JTL] Direct sync completed for order ${orderIdentifier}`);
+      return { success: true };
+    } catch (error: any) {
+      console.error(`[JTL] Direct sync failed for order ${orderIdentifier}:`, error.message);
+      return { success: false, error: error.message };
     }
   }
 

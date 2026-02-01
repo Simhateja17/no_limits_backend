@@ -465,20 +465,19 @@ enum SyncStatus {
 
 // Fulfillment state for orders (Operational truth = No-Limits platform)
 enum FulfillmentState {
-  PENDING             // Not yet started
-  AWAITING_STOCK      // Waiting for inventory
-  READY_FOR_PICKING   // Ready to be picked
-  PICKING             // Currently being picked
-  PICKED              // Picking complete
-  PACKING             // Being packed
-  PACKED              // Packed, ready to ship
-  LABEL_CREATED       // Shipping label created
-  SHIPPED             // Handed to carrier
-  IN_TRANSIT          // In transit to customer
-  OUT_FOR_DELIVERY    // Out for delivery
-  DELIVERED           // Successfully delivered
-  FAILED_DELIVERY     // Delivery failed
-  RETURNED_TO_SENDER  // Package returned to warehouse
+  PENDING              // Initial state - maps to FFN 'pending'
+  PREPARATION          // Order being prepared - maps to FFN 'preparation'
+  ACKNOWLEDGED         // Order acknowledged by FFN - maps to FFN 'acknowledged'
+  LOCKED               // Order locked for processing - maps to FFN 'locked'
+  PICKPROCESS          // Items being picked - maps to FFN 'pickprocess'
+  SHIPPED              // Order shipped - maps to FFN 'shipped'
+  PARTIALLY_SHIPPED    // Partial shipment - maps to FFN 'partiallyShipped'
+  CANCELED             // Order canceled - maps to FFN 'canceled'
+  PARTIALLY_CANCELED   // Partial cancellation - maps to FFN 'partiallyCanceled'
+  IN_TRANSIT           // In transit to customer (post-FFN tracking)
+  DELIVERED            // Successfully delivered (post-FFN tracking)
+  FAILED_DELIVERY      // Delivery failed (post-FFN tracking)
+  RETURNED_TO_SENDER   // Package returned (post-FFN tracking)
 }
 
 // Return inspection result

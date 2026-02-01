@@ -113,7 +113,6 @@ export class OrderOperationsService {
             const nonEditableStates: FulfillmentState[] = [
                 'SHIPPED',
                 'IN_TRANSIT',
-                'OUT_FOR_DELIVERY',
                 'DELIVERED',
                 'RETURNED_TO_SENDER',
             ];
@@ -464,7 +463,6 @@ export class OrderOperationsService {
             const nonHoldableStates: FulfillmentState[] = [
                 'SHIPPED',
                 'IN_TRANSIT',
-                'OUT_FOR_DELIVERY',
                 'DELIVERED',
             ];
 

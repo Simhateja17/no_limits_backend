@@ -1864,7 +1864,7 @@ export class JTLService {
           jtlOutboundId: result.outboundId,
           lastJtlSync: new Date(),
           syncStatus: 'SYNCED',
-          fulfillmentState: 'AWAITING_STOCK',
+          fulfillmentState: 'PENDING',
         },
       });
 
@@ -2112,7 +2112,7 @@ export class JTLService {
           jtlFulfillmentId: result.outboundId,
           lastJtlSync: new Date(),
           syncStatus: 'SYNCED',
-          fulfillmentState: 'AWAITING_STOCK',
+          fulfillmentState: 'PENDING',
         },
       });
 

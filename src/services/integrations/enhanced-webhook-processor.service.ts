@@ -1015,7 +1015,7 @@ export class EnhancedWebhookProcessor {
             data: {
               shopifyFulfillmentOrderId: `gid://shopify/FulfillmentOrder/${externalId}`,
               shopifyFulfillmentRequestStatus: 'SUBMITTED',
-              fulfillmentState: 'AWAITING_STOCK',
+              fulfillmentState: 'PENDING',
             },
           });
           break;
@@ -1026,7 +1026,7 @@ export class EnhancedWebhookProcessor {
             where: { id: order.id },
             data: {
               shopifyFulfillmentRequestStatus: 'ACCEPTED',
-              fulfillmentState: 'READY_FOR_PICKING',
+              fulfillmentState: 'ACKNOWLEDGED',
             },
           });
           break;

@@ -164,7 +164,7 @@ export class JTLOrderSyncService {
                     jtlOutboundId: result.outboundId,
                     lastJtlSync: new Date(),
                     syncStatus: 'SYNCED',
-                    fulfillmentState: 'AWAITING_STOCK', // FFN now has the order
+                    fulfillmentState: 'PENDING', // FFN now has the order
                 },
             });
 
@@ -513,17 +513,31 @@ export class JTLOrderSyncService {
      */
     private mapFFNStatusToFulfillmentState(ffnStatus: string): FulfillmentState {
         const statusMap: Record<string, FulfillmentState> = {
-            'NEW': 'AWAITING_STOCK',
-            'OPEN': 'READY_FOR_PICKING',
-            'IN_PICK': 'PICKING',
-            'PICKED': 'PICKED',
-            'PACKING': 'PACKING',
-            'PACKED': 'PACKED',
+            'PENDING': 'PENDING',
+            'PREPARATION': 'PREPARATION',
+            'ACKNOWLEDGED': 'ACKNOWLEDGED',
+            'LOCKED': 'LOCKED',
+            'PICKPROCESS': 'PICKPROCESS',
             'SHIPPED': 'SHIPPED',
+            'PARTIALLY_SHIPPED': 'PARTIALLY_SHIPPED',
+            'PARTIALLYSHIPPED': 'PARTIALLY_SHIPPED',
+            'CANCELED': 'CANCELED',
+            'CANCELLED': 'CANCELED',
+            'PARTIALLY_CANCELED': 'PARTIALLY_CANCELED',
+            'PARTIALLYCANCELED': 'PARTIALLY_CANCELED',
+            'IN_TRANSIT': 'IN_TRANSIT',
+            'INTRANSIT': 'IN_TRANSIT',
             'DELIVERED': 'DELIVERED',
-            'CANCELLED': 'PENDING',
             'FAILED': 'FAILED_DELIVERY',
             'RETURNED': 'RETURNED_TO_SENDER',
+
+            // Backward compatibility with old FFN status names
+            'NEW': 'PENDING',
+            'OPEN': 'PREPARATION',
+            'IN_PICK': 'PICKPROCESS',
+            'PICKED': 'PICKPROCESS',
+            'PACKING': 'PICKPROCESS',
+            'PACKED': 'LOCKED',
         };
 
         return statusMap[ffnStatus.toUpperCase()] || 'PENDING';

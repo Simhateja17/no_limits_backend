@@ -20,26 +20,37 @@ import { generateJobId } from '../utils/job-id.js';
 
 // Status mappings between platforms
 const JTL_TO_NOLIMITS_STATUS: Record<string, string> = {
-  'new': 'PENDING',
-  'pending': 'AWAITING_STOCK',
-  'processing': 'PROCESSING',
-  'picking': 'PICKING',
-  'packing': 'PACKING',
+  'pending': 'PENDING',
+  'preparation': 'PREPARATION',
+  'acknowledged': 'ACKNOWLEDGED',
+  'locked': 'LOCKED',
+  'pickprocess': 'PICKPROCESS',
   'shipped': 'SHIPPED',
+  'partiallyshipped': 'PARTIALLY_SHIPPED',
+  'canceled': 'CANCELED',
+  'partiallycanceled': 'PARTIALLY_CANCELED',
+  // Post-FFN tracking states (may come from carrier webhooks)
+  'intransit': 'IN_TRANSIT',
   'delivered': 'DELIVERED',
-  'cancelled': 'CANCELLED',
+  'failed': 'FAILED_DELIVERY',
+  'returned': 'RETURNED_TO_SENDER',
 };
 
 const NOLIMITS_TO_SHOPIFY_STATUS: Record<string, string> = {
   'PENDING': 'OPEN',
-  'AWAITING_STOCK': 'OPEN',
-  'PROCESSING': 'IN_PROGRESS',
-  'PICKING': 'IN_PROGRESS',
-  'PACKING': 'IN_PROGRESS',
+  'PREPARATION': 'IN_PROGRESS',
+  'ACKNOWLEDGED': 'IN_PROGRESS',
+  'LOCKED': 'IN_PROGRESS',
+  'PICKPROCESS': 'IN_PROGRESS',
   'SHIPPED': 'CLOSED',
+  'PARTIALLY_SHIPPED': 'IN_PROGRESS',
+  'CANCELED': 'CANCELLED',
+  'PARTIALLY_CANCELED': 'IN_PROGRESS',
+  'IN_TRANSIT': 'CLOSED',
   'DELIVERED': 'CLOSED',
+  'FAILED_DELIVERY': 'OPEN',
+  'RETURNED_TO_SENDER': 'CANCELLED',
   'ON_HOLD': 'ON_HOLD',
-  'CANCELLED': 'CANCELLED',
 };
 
 interface SyncResult {
