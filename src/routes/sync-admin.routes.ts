@@ -836,13 +836,14 @@ export function createSyncAdminRoutes(prisma: PrismaClient): Router {
         }
       }
 
+      // Check if any client sync had errors
+      const hasErrors = results.some(r => r.error);
+
       res.json({
-        success: true,
-        data: {
-          updatesProcessed: totalUpdates,
-          message: `Processed ${totalUpdates} updates from JTL-FFN across ${clientsWithJtl.length} clients`,
-          details: results,
-        },
+        success: !hasErrors,
+        updatesProcessed: totalUpdates,
+        message: `Processed ${totalUpdates} updates from JTL-FFN across ${clientsWithJtl.length} clients`,
+        details: results,
       });
     } catch (error: any) {
       res.status(500).json({ success: false, error: error.message });
@@ -865,11 +866,9 @@ export function createSyncAdminRoutes(prisma: PrismaClient): Router {
       if (result.success) {
         res.json({
           success: true,
-          data: {
-            clientId,
-            updatesProcessed: result.updatesProcessed,
-            message: `Processed ${result.updatesProcessed} updates from JTL-FFN`,
-          },
+          clientId,
+          updatesProcessed: result.updatesProcessed,
+          message: `Processed ${result.updatesProcessed} updates from JTL-FFN`,
         });
       } else {
         res.status(400).json({ success: false, error: result.error });
