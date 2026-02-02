@@ -655,6 +655,7 @@ model ProductSyncQueue {
   
   @@index([status, scheduledFor])
   @@index([productId, status])
+  @@index([status, priority, scheduledFor])  // For efficient priority-based ordering
   @@map("product_sync_queue")
 }
 

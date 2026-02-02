@@ -27,6 +27,7 @@ import {
 } from '@prisma/client';
 import { ShopifyService } from './shopify.service.js';
 import { WooCommerceService } from './woocommerce.service.js';
+import { SyncLogger } from '../../utils/sync-logger.js';
 
 type Decimal = Prisma.Decimal;
 
@@ -130,6 +131,8 @@ export interface ReturnRefundData {
 // ============= RETURN SYNC SERVICE =============
 
 export class ReturnSyncService {
+  private syncLogger = new SyncLogger('ReturnSync');
+
   constructor(
     private prisma: PrismaClient,
     private shopifyService?: ShopifyService,

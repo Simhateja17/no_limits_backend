@@ -20,6 +20,7 @@ import { PrismaClient, SyncOrigin } from '@prisma/client';
 import { JTLService, JTLProductWithStock } from './jtl.service.js';
 import { getEncryptionService } from '../encryption.service.js';
 import { getQueue, QUEUE_NAMES } from '../queue/sync-queue.service.js';
+import { SyncLogger, BatchResult } from '../../utils/sync-logger.js';
 
 interface StockSyncResult {
   success: boolean;
@@ -63,6 +64,7 @@ interface JTLCredentials {
 export class StockSyncService {
   private prisma: PrismaClient;
   private lastInboundPollTime: Map<string, Date> = new Map(); // clientId -> lastPollTime
+  private syncLogger = new SyncLogger('StockSync');
 
   constructor(prisma: PrismaClient) {
     this.prisma = prisma;
@@ -77,7 +79,10 @@ export class StockSyncService {
     });
 
     if (!jtlConfig || !jtlConfig.isActive) {
-      console.log(`[StockSync] No active JTL config for client ${clientId}`);
+      this.syncLogger.getLogger().debug({
+        event: 'no_jtl_config',
+        clientId
+      });
       return null;
     }
 
@@ -105,8 +110,7 @@ export class StockSyncService {
     jfskus?: string[];  // Optional: only sync specific products
     forceUpdate?: boolean;  // Update even if stock hasn't changed
   }): Promise<StockSyncResult> {
-    const startTime = Date.now();
-    console.log(`[StockSync] Starting stock sync for client ${clientId}`);
+    this.syncLogger.startBatch();
 
     const result: StockSyncResult = {
       success: false,
@@ -128,11 +132,9 @@ export class StockSyncService {
       // Fetch products with stock from JTL FFN using the dedicated Stocks API
       // This is the proper way to get stock levels for merchants
       const jtlProducts = await jtlService.getAllProductsWithStock();
-      console.log(`[StockSync] Fetched ${jtlProducts.length} products with stock from JTL FFN`);
 
       if (jtlProducts.length === 0) {
         result.success = true;
-        console.log(`[StockSync] No products with stock to sync`);
         return result;
       }
 
@@ -231,7 +233,13 @@ export class StockSyncService {
               newReserved: newReserved,
             });
 
-            console.log(`[StockSync] Updated ${localProduct.sku}: available ${localProduct.available} → ${newAvailable}, reserved ${localProduct.reserved} → ${newReserved}, announced ${localProduct.announced} → ${newAnnounced}`);
+            // Log individual stock change
+            this.syncLogger.logStateChange({
+              id: localProduct.id,
+              displayId: localProduct.sku,
+              oldState: `stock: ${localProduct.available}`,
+              newState: `stock: ${newAvailable}`
+            });
 
             // Queue sync to Shopify/WooCommerce to push stock changes
             await this.queueStockSyncToCommerce(localProduct.id);
@@ -241,18 +249,32 @@ export class StockSyncService {
         } catch (error) {
           result.productsFailed++;
           result.errors.push(`Failed to update ${localProduct.sku}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+          this.syncLogger.getLogger().error({
+            event: 'stock_update_failed',
+            sku: localProduct.sku,
+            error: error instanceof Error ? error.message : 'Unknown error'
+          });
         }
       }
 
       result.success = result.productsFailed === 0;
 
-      const duration = Date.now() - startTime;
-      console.log(`[StockSync] Completed for client ${clientId} in ${duration}ms: ${result.productsUpdated} updated, ${result.productsUnchanged} unchanged, ${result.productsFailed} failed`);
+      // Log batch summary
+      this.syncLogger.logBatchSummary('Stock Sync', {
+        totalProcessed: result.productsUpdated + result.productsUnchanged,
+        updated: result.productsUpdated,
+        unchanged: result.productsUnchanged,
+        failed: result.productsFailed
+      });
 
       return result;
     } catch (error) {
       result.errors.push(error instanceof Error ? error.message : 'Unknown error');
-      console.error(`[StockSync] Failed for client ${clientId}:`, error);
+      this.syncLogger.getLogger().error({
+        event: 'stock_sync_failed',
+        clientId,
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
       return result;
     }
   }
@@ -266,7 +288,6 @@ export class StockSyncService {
     stockSyncTriggered: boolean;
     stockSyncResult?: StockSyncResult;
   }> {
-    console.log(`[StockSync] Polling inbound updates for client ${clientId}`);
 
     const result = {
       inboundsProcessed: 0,
@@ -292,11 +313,9 @@ export class StockSyncService {
       this.lastInboundPollTime.set(clientId, new Date());
 
       if (updates.length === 0) {
-        console.log(`[StockSync] No inbound updates for client ${clientId}`);
         return result;
       }
 
-      console.log(`[StockSync] Found ${updates.length} inbound updates for client ${clientId}`);
 
       // Check for closed/receipted inbounds
       const closedInbounds: InboundUpdate[] = [];
@@ -340,13 +359,21 @@ export class StockSyncService {
           }
 
           // Log the inbound completion
-          console.log(`[StockSync] Inbound ${update.id} (${updateData?.merchantInboundNumber}) status: ${status}`);
+          this.syncLogger.getLogger().info({
+            event: 'inbound_closed',
+            inboundId: update.id,
+            merchantInboundNumber: updateData?.merchantInboundNumber,
+            status
+          });
         }
       }
 
       // If any inbounds closed, trigger stock sync
       if (closedInbounds.length > 0) {
-        console.log(`[StockSync] ${closedInbounds.length} inbounds closed, triggering stock sync`);
+        this.syncLogger.getLogger().info({
+          event: 'triggering_stock_sync',
+          closedInboundsCount: closedInbounds.length
+        });
 
         result.stockSyncTriggered = true;
 
@@ -359,7 +386,11 @@ export class StockSyncService {
 
       return result;
     } catch (error) {
-      console.error(`[StockSync] Failed to poll inbound updates for client ${clientId}:`, error);
+      this.syncLogger.getLogger().error({
+        event: 'inbound_poll_failed',
+        clientId,
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
       return result;
     }
   }
@@ -374,7 +405,6 @@ export class StockSyncService {
     totalProductsFailed: number;
     results: Map<string, StockSyncResult>;
   }> {
-    console.log(`[StockSync] Starting stock sync for all clients`);
 
     const overallResult = {
       clientsProcessed: 0,
@@ -396,7 +426,6 @@ export class StockSyncService {
       },
     });
 
-    console.log(`[StockSync] Found ${clients.length} clients with active JTL config`);
 
     for (const client of clients) {
       try {
@@ -406,11 +435,21 @@ export class StockSyncService {
         overallResult.totalProductsUpdated += result.productsUpdated;
         overallResult.totalProductsFailed += result.productsFailed;
       } catch (error) {
-        console.error(`[StockSync] Failed for client ${client.id} (${client.companyName}):`, error);
+        this.syncLogger.getLogger().error({
+          event: 'client_sync_failed',
+          clientId: client.id,
+          companyName: client.companyName,
+          error: error instanceof Error ? error.message : 'Unknown error'
+        });
       }
     }
 
-    console.log(`[StockSync] All clients sync completed: ${overallResult.clientsProcessed} clients, ${overallResult.totalProductsUpdated} products updated, ${overallResult.totalProductsFailed} failed`);
+    this.syncLogger.getLogger().info({
+      event: 'all_clients_sync_completed',
+      clientsProcessed: overallResult.clientsProcessed,
+      totalProductsUpdated: overallResult.totalProductsUpdated,
+      totalProductsFailed: overallResult.totalProductsFailed
+    });
 
     return overallResult;
   }
@@ -424,7 +463,6 @@ export class StockSyncService {
     totalInboundsProcessed: number;
     stockSyncsTriggered: number;
   }> {
-    console.log(`[StockSync] Polling inbounds for all clients`);
 
     const result = {
       clientsProcessed: 0,
@@ -453,11 +491,20 @@ export class StockSyncService {
           result.stockSyncsTriggered++;
         }
       } catch (error) {
-        console.error(`[StockSync] Failed to poll inbounds for client ${client.id}:`, error);
+        this.syncLogger.getLogger().error({
+          event: 'inbound_poll_failed',
+          clientId: client.id,
+          error: error instanceof Error ? error.message : 'Unknown error'
+        });
       }
     }
 
-    console.log(`[StockSync] Inbound polling completed: ${result.clientsProcessed} clients, ${result.totalInboundsProcessed} inbounds, ${result.stockSyncsTriggered} stock syncs triggered`);
+    this.syncLogger.getLogger().info({
+      event: 'inbound_polling_completed',
+      clientsProcessed: result.clientsProcessed,
+      totalInboundsProcessed: result.totalInboundsProcessed,
+      stockSyncsTriggered: result.stockSyncsTriggered
+    });
 
     return result;
   }
@@ -505,7 +552,10 @@ export class StockSyncService {
     try {
       const queue = getQueue();
       if (!queue) {
-        console.warn(`[StockSync] Queue not available, skipping commerce sync for product ${productId}`);
+        this.syncLogger.getLogger().warn({
+          event: 'queue_unavailable',
+          productId
+        });
         return;
       }
 
@@ -542,7 +592,6 @@ export class StockSyncService {
               retryDelay: 30,
             }
           );
-          console.log(`[StockSync] Queued Shopify stock sync for product ${productId}`);
         } else if (pc.channel.type === 'WOOCOMMERCE') {
           await queue.enqueue(
             QUEUE_NAMES.PRODUCT_SYNC_TO_WOOCOMMERCE,
@@ -558,11 +607,14 @@ export class StockSyncService {
               retryDelay: 30,
             }
           );
-          console.log(`[StockSync] Queued WooCommerce stock sync for product ${productId}`);
         }
       }
     } catch (error) {
-      console.error(`[StockSync] Failed to queue commerce sync for product ${productId}:`, error);
+      this.syncLogger.getLogger().error({
+        event: 'queue_commerce_sync_failed',
+        productId,
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
       // Don't throw - stock is already updated in DB, commerce sync can be retried
     }
   }

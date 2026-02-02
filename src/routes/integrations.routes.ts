@@ -2410,7 +2410,7 @@ export function initializeEnhancedSync(prismaClient: PrismaClient): void {
   enhancedWebhookProcessor = new EnhancedWebhookProcessor(prismaClient);
   syncQueueProcessor = new SyncQueueProcessor(prismaClient, {
     batchSize: 10,
-    pollIntervalMs: 5000,
+    pollIntervalMs: 30000,  // Every 30 seconds (reduced from 5s to prevent timeout spiral)
     maxRetries: 3,
   });
   jtlPollingService = new JTLPollingService(prismaClient, 2 * 60 * 1000); // Poll every 2 minutes

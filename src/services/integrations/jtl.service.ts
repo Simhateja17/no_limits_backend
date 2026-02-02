@@ -350,16 +350,6 @@ export class JTLService {
     const url = `${this.baseUrl}${endpoint}`;
     const method = options.method || 'GET';
 
-    this.logger.debug({
-      jobId: requestJobId,
-      event: 'api_request',
-      method,
-      url,
-      endpoint,
-      bodySize: options.body ? Buffer.byteLength(options.body as string) : 0,
-      clientId: this.internalClientId
-    });
-
     const response = await fetch(url, {
       ...options,
       headers: {
@@ -390,32 +380,10 @@ export class JTLService {
 
     // Handle 204 No Content
     if (response.status === 204) {
-      this.logger.debug({
-        jobId: requestJobId,
-        event: 'api_response',
-        method,
-        url,
-        status: response.status,
-        duration,
-        responseType: 'no_content'
-      });
-
       return {} as T;
     }
 
     const data = await response.json() as T;
-
-    this.logger.debug({
-      jobId: requestJobId,
-      event: 'api_response',
-      method,
-      url,
-      status: response.status,
-      duration,
-      responseSize: JSON.stringify(data).length,
-      itemCount: Array.isArray(data) ? data.length : (data && typeof data === 'object' && 'items' in data && Array.isArray((data as {items: unknown[]}).items)) ? (data as {items: unknown[]}).items.length : undefined
-    });
-
     return data;
   }
 
@@ -564,7 +532,6 @@ export class JTLService {
     const response = await this.request<{ items?: JTLOutboundResponse[]; outbounds?: JTLOutboundResponse[]; count?: number; nextPageLink?: string }>(endpoint);
     // JTL API returns items, not outbounds (similar to products endpoint)
     const outbounds = response.items || response.outbounds || [];
-    console.log(`[JTL] getOutbounds response: count=${response.count}, items.length=${outbounds.length}`);
     return outbounds;
   }
 
@@ -667,27 +634,59 @@ export class JTLService {
 
   /**
    * Get outbound status updates (polling endpoint)
+   *
+   * @param params.fromDate - ISO datetime string for start of timeframe
+   * @param params.toDate - ISO datetime string for end of timeframe
+   * @param params.page - Page number for pagination (default: 1)
+   * @param params.ignoreOwnApplicationId - Filter out self-made changes
+   * @param params.ignoreOwnUserId - Filter out self-made changes
+   * @returns Full response with data array and pagination info
    */
   async getOutboundUpdates(params: {
-    since?: string;
-    limit?: number;
-    offset?: number;
-  } = {}): Promise<JTLUpdateItem<JTLOutboundResponse>[]> {
+    fromDate?: string;
+    toDate?: string;
+    page?: number;
+    ignoreOwnApplicationId?: boolean;
+    ignoreOwnUserId?: boolean;
+  } = {}): Promise<{
+    data: JTLOutboundResponse[];
+    moreDataAvailable: boolean;
+    nextChunkUrl?: string;
+    from: string;
+    to: string;
+  }> {
     const queryParams = new URLSearchParams();
-    
-    Object.entries(params).forEach(([key, value]) => {
-      if (value !== undefined) {
-        queryParams.set(key, String(value));
-      }
-    });
+
+    // Add parameters with correct JTL API names
+    if (params.fromDate) queryParams.set('fromDate', params.fromDate);
+    if (params.toDate) queryParams.set('toDate', params.toDate);
+    if (params.page !== undefined) queryParams.set('page', String(params.page));
+    if (params.ignoreOwnApplicationId !== undefined) {
+      queryParams.set('ignoreOwnApplicationId', String(params.ignoreOwnApplicationId));
+    }
+    if (params.ignoreOwnUserId !== undefined) {
+      queryParams.set('ignoreOwnUserId', String(params.ignoreOwnUserId));
+    }
 
     const query = queryParams.toString();
     const endpoint = `/v1/merchant/outbounds/updates${query ? `?${query}` : ''}`;
 
-    const response = await this.request<{ items?: JTLUpdateItem<JTLOutboundResponse>[]; updates?: JTLUpdateItem<JTLOutboundResponse>[]; count?: number }>(endpoint);
-    const updates = response.items || response.updates || [];
-    console.log(`[JTL] getOutboundUpdates response: count=${response.count}, items.length=${updates.length}`);
-    return updates;
+    const response = await this.request<{
+      nextChunkUrl?: string;
+      from: string;
+      to: string;
+      data: JTLOutboundResponse[];
+      moreDataAvailable: boolean;
+    }>(endpoint);
+
+    // Return the full response so caller can handle pagination
+    return {
+      data: response.data || [],
+      moreDataAvailable: response.moreDataAvailable || false,
+      nextChunkUrl: response.nextChunkUrl,
+      from: response.from,
+      to: response.to,
+    };
   }
 
   // ============= PRODUCTS =============
@@ -841,10 +840,6 @@ export class JTLService {
     const endpoint = `/v1/merchant/products${query ? `?${query}` : ''}`;
 
     const response = await this.request<{ items: JTLProductResponse[]; count?: number }>(endpoint);
-    console.log(`[JTL] getProducts response: count=${response.count}, items.length=${response.items?.length || 0}`);
-    if (response.items?.length > 0) {
-      console.log(`[JTL] First item: jfsku=${response.items[0].jfsku}, merchantSku=${response.items[0].merchantSku}`);
-    }
     return response.items || [];
   }
 
@@ -1723,13 +1718,17 @@ export class JTLService {
     error?: string;
   }> {
     try {
-      const updates = await this.getOutboundUpdates({ since });
+      const response = await this.getOutboundUpdates({
+        fromDate: since,
+        toDate: new Date(Date.now() - 5000).toISOString(), // Subtract 5s to avoid clock sync issues
+        page: 1
+      });
 
-      const processedUpdates = updates.map((update) => ({
-        outboundId: update.id,
-        merchantOutboundNumber: update.data.merchantOutboundNumber,
-        currentStatus: update.data.status,
-        updatedAt: update.timestamp,
+      const processedUpdates = response.data.map((update) => ({
+        outboundId: update.outboundId,
+        merchantOutboundNumber: update.merchantOutboundNumber,
+        currentStatus: update.status,
+        updatedAt: update.createdAt || new Date().toISOString(),
       }));
 
       console.log(`[JTL] Polled ${processedUpdates.length} outbound updates since ${since}`);

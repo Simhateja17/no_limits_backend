@@ -55,6 +55,12 @@ export const initializeSocket = (httpServer: HTTPServer): SocketIOServer => {
     // Join user to their personal room
     socket.join(`user:${user.userId}`);
 
+    // Join user to their client room for client-scoped events
+    if (user.clientId) {
+      socket.join(`client:${user.clientId}`);
+      console.log(`User ${user.email} joined client room: ${user.clientId}`);
+    }
+
     // Emit online status to all users
     io.emit('user:online', { userId: user.userId });
 
@@ -196,6 +202,11 @@ export const emitToRoom = (roomId: string, event: string, data: any) => {
 // Helper function to emit events to task chat rooms
 export const emitToTaskRoom = (taskId: string, event: string, data: any) => {
   io.to(`task:${taskId}`).emit(event, data);
+};
+
+// Helper function to emit events to client rooms (for client-scoped data updates)
+export const emitToClient = (clientId: string, event: string, data: any) => {
+  io.to(`client:${clientId}`).emit(event, data);
 };
 
 // Helper function to check if user is online

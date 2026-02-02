@@ -640,7 +640,7 @@ export class ProductSyncService {
           },
         });
 
-        this.logger.info({
+        this.logger.debug({
           jobId,
           event: 'platform_sync_success',
           platform: channelType,

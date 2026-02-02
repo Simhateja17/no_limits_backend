@@ -28,6 +28,7 @@ import { WooCommerceService } from './woocommerce.service.js';
 import { JTLService } from './jtl.service.js';
 import ShippingMethodService from '../shipping-method.service.js';
 import { notificationService } from '../notification.service.js';
+import { SyncLogger } from '../../utils/sync-logger.js';
 
 /**
  * Test mode detection constants
@@ -277,7 +278,8 @@ export interface OrderSplitData {
 
 export class OrderSyncService {
   private shippingMethodService: ShippingMethodService;
-  
+  private syncLogger = new SyncLogger('OrderSync');
+
   constructor(
     private prisma: PrismaClient,
     private shopifyService?: ShopifyService,

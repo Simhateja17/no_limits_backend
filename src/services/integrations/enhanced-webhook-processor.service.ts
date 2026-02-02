@@ -16,6 +16,7 @@ import { ProductSyncService, IncomingProductData, SyncOriginType } from './produ
 import { OrderSyncService, IncomingOrderData } from './order-sync.service.js';
 import { ReturnSyncService, IncomingReturnData } from './return-sync.service.js';
 import crypto from 'crypto';
+import { Logger } from '../../utils/logger.js';
 
 // ============= TYPES =============
 
@@ -283,6 +284,7 @@ export class EnhancedWebhookProcessor {
   private orderSyncService: OrderSyncService;
   private returnSyncService: ReturnSyncService;
   private processedWebhooks: Map<string, number> = new Map();
+  private logger = new Logger('EnhancedWebhook');
 
   // Clean up processed webhooks every 5 minutes
   private cleanupInterval: NodeJS.Timeout;

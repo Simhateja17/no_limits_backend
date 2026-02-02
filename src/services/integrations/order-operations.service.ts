@@ -19,6 +19,7 @@ import {
     OrderStatus,
     Prisma,
 } from '@prisma/client';
+import { Logger } from '../../utils/logger.js';
 
 // ============= TYPES =============
 
@@ -89,6 +90,8 @@ export interface OperationResult {
 // ============= SERVICE =============
 
 export class OrderOperationsService {
+    private logger = new Logger('OrderOps');
+
     constructor(private prisma: PrismaClient) { }
 
     /**

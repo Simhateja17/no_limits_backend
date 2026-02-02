@@ -11,11 +11,12 @@
  * - Metrics and monitoring
  */
 
-import { PrismaClient, SyncOrigin } from '@prisma/client';
+import { PrismaClient, SyncOrigin, FulfillmentState } from '@prisma/client';
 import { ProductSyncService } from './product-sync.service.js';
 import { JTLService } from './jtl.service.js';
 import { getEncryptionService } from '../encryption.service.js';
 import { Logger } from '../../utils/logger.js';
+import { SyncLogger, BatchResult } from '../../utils/sync-logger.js';
 import { generateJobId } from '../../utils/job-id.js';
 
 // ============= TYPES =============
@@ -72,11 +73,17 @@ export class SyncQueueProcessor {
    */
   start(): void {
     if (this.isRunning) {
-      console.log('[SyncQueueProcessor] Already running');
+      this.logger.debug({ event: 'processor_already_running' });
       return;
     }
 
-    console.log('[SyncQueueProcessor] Starting...');
+    this.logger.debug({
+      event: 'processor_started',
+      config: {
+        batchSize: this.options.batchSize,
+        pollIntervalMs: this.options.pollIntervalMs
+      }
+    });
     this.isRunning = true;
     this.metrics.isRunning = true;
 
@@ -93,7 +100,7 @@ export class SyncQueueProcessor {
    * Stop the queue processor
    */
   stop(): void {
-    console.log('[SyncQueueProcessor] Stopping...');
+    this.logger.debug({ event: 'processor_stopped' });
     this.isRunning = false;
     this.metrics.isRunning = false;
 
@@ -118,12 +125,6 @@ export class SyncQueueProcessor {
 
     const jobId = generateJobId('queue-batch');
     const startTime = Date.now();
-
-    this.logger.debug({
-      jobId,
-      event: 'batch_started',
-      operation: 'processQueue'
-    });
 
     try {
       // Get pending jobs
@@ -151,19 +152,6 @@ export class SyncQueueProcessor {
           },
         },
       });
-
-      if (jobs.length > 0) {
-        this.logger.debug({
-          jobId,
-          event: 'product_jobs_found',
-          jobCount: jobs.length,
-          batchSize: this.options.batchSize
-        });
-
-        for (const job of jobs) {
-          await this.processJob(job, jobId);
-        }
-      }
 
       // Process order queue
       const orderJobs = await this.prisma.orderSyncQueue.findMany({
@@ -194,24 +182,30 @@ export class SyncQueueProcessor {
         },
       });
 
-      if (orderJobs.length > 0) {
-        this.logger.debug({
+      // Only log if there are jobs to process
+      if (jobs.length > 0 || orderJobs.length > 0) {
+        this.logger.info({
           jobId,
-          event: 'order_jobs_found',
-          jobCount: orderJobs.length,
-          batchSize: this.options.batchSize
+          event: 'batch_started',
+          operation: 'processQueue',
+          productJobs: jobs.length,
+          orderJobs: orderJobs.length
         });
 
+        // Process product jobs
+        for (const job of jobs) {
+          await this.processJob(job, jobId);
+        }
+
+        // Process order jobs
         for (const orderJob of orderJobs) {
           await this.processOrderJob(orderJob, jobId);
         }
-      }
 
-      this.metrics.lastRunAt = new Date();
-      const processingTime = Date.now() - startTime;
-      this.updateAvgProcessingTime(processingTime);
+        this.metrics.lastRunAt = new Date();
+        const processingTime = Date.now() - startTime;
+        this.updateAvgProcessingTime(processingTime);
 
-      if (jobs.length > 0 || orderJobs.length > 0) {
         this.logger.info({
           jobId,
           event: 'batch_completed',
@@ -221,6 +215,9 @@ export class SyncQueueProcessor {
           orderJobs: orderJobs.length,
           totalProcessed: jobs.length + orderJobs.length
         });
+      } else {
+        // Silent when no jobs - just update metrics
+        this.metrics.lastRunAt = new Date();
       }
 
     } catch (error) {
@@ -678,12 +675,6 @@ export class SyncQueueProcessor {
         ],
       };
 
-      console.log('[OrderQueue] Pushing order to JTL:', {
-        orderId: order.id,
-        merchantOutboundNumber: jtlOutbound.merchantOutboundNumber,
-        itemCount: outboundItems.length,
-      });
-
       const result = await jtlService.createOutbound(jtlOutbound);
 
       // Update order with JTL outbound ID
@@ -696,14 +687,8 @@ export class SyncQueueProcessor {
         },
       });
 
-      console.log('[OrderQueue] Order pushed to JTL successfully:', {
-        orderId: order.id,
-        jtlOutboundId: result.outboundId,
-      });
-
       return { success: true };
     } catch (error) {
-      console.error('[OrderQueue] Failed to push order to JTL:', error);
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Unknown error',
@@ -841,7 +826,6 @@ export class SyncQueueProcessor {
 
     // Only queue for JTL if configured
     if (!order.client.jtlConfig) {
-      console.log(`[OrderQueue] Client ${order.clientId} has no JTL config, skipping order sync`);
       return null;
     }
 
@@ -942,7 +926,13 @@ export class SyncQueueProcessor {
       },
     });
 
-    console.log(`[SyncQueueProcessor] Cleaned up ${result.count} old jobs`);
+    if (result.count > 0) {
+      this.logger.info({
+        event: 'cleanup_completed',
+        jobsDeleted: result.count,
+        daysOld
+      });
+    }
     return result.count;
   }
 }
@@ -959,6 +949,7 @@ export class JTLPollingService {
   private isRunning: boolean = false;
   private intervalId: NodeJS.Timeout | null = null;
   private pollIntervalMs: number;
+  private syncLogger = new SyncLogger('JTLPollingService');
 
   constructor(prisma: PrismaClient, pollIntervalMs: number = 2 * 60 * 1000) {
     this.prisma = prisma;
@@ -967,12 +958,56 @@ export class JTLPollingService {
   }
 
   /**
+   * Map JTL FFN status to FulfillmentState enum
+   */
+  private mapFFNStatusToFulfillmentState(ffnStatus: string): FulfillmentState {
+    const statusMap: Record<string, FulfillmentState> = {
+      'PENDING': 'PENDING',
+      'PREPARATION': 'PREPARATION',
+      'ACKNOWLEDGED': 'ACKNOWLEDGED',
+      'LOCKED': 'LOCKED',
+      'PICKPROCESS': 'PICKPROCESS',
+      'SHIPPED': 'SHIPPED',
+      'PARTIALLY_SHIPPED': 'PARTIALLY_SHIPPED',
+      'PARTIALLYSHIPPED': 'PARTIALLY_SHIPPED',
+      'CANCELED': 'CANCELED',
+      'CANCELLED': 'CANCELED',
+      'PARTIALLY_CANCELED': 'PARTIALLY_CANCELED',
+      'PARTIALLYCANCELED': 'PARTIALLY_CANCELED',
+      'IN_TRANSIT': 'IN_TRANSIT',
+      'INTRANSIT': 'IN_TRANSIT',
+      'DELIVERED': 'DELIVERED',
+      'FAILED': 'FAILED_DELIVERY',
+      'RETURNED': 'RETURNED_TO_SENDER',
+    };
+
+    const normalized = ffnStatus.toUpperCase().replace(/[_\s-]/g, '');
+    const mapped = statusMap[normalized];
+
+    // ⚠️ LOG UNMAPPED STATUSES - helps identify new JTL statuses we haven't mapped yet
+    if (!mapped) {
+      this.syncLogger.getLogger().warn({
+        event: 'unmapped_jtl_status',
+        rawStatus: ffnStatus,
+        normalizedStatus: normalized,
+        defaultingTo: 'PENDING',
+        message: 'JTL status not recognized - please add to statusMap'
+      });
+    }
+
+    return mapped || 'PENDING';
+  }
+
+  /**
    * Start polling
    */
   start(): void {
     if (this.isRunning) return;
 
-    console.log('[JTLPollingService] Starting...');
+    this.syncLogger.getLogger().debug({
+      event: 'polling_started',
+      pollIntervalMs: this.pollIntervalMs
+    });
     this.isRunning = true;
 
     // Initial poll
@@ -988,7 +1023,7 @@ export class JTLPollingService {
    * Stop polling
    */
   stop(): void {
-    console.log('[JTLPollingService] Stopping...');
+    this.syncLogger.getLogger().debug({ event: 'polling_stopped' });
     this.isRunning = false;
 
     if (this.intervalId) {
@@ -1060,17 +1095,29 @@ export class JTLPollingService {
       // GET /api/v1/merchant/products with $select=stock to get stock levels
       try {
         // Get the last sync time to only fetch recent updates
-        const since = config.lastSyncAt?.toISOString();
-        const outboundUpdates = await jtlService.getOutboundUpdates({ since, limit: 100 });
+        const fromDate = config.lastSyncAt?.toISOString() || new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+        const response = await jtlService.getOutboundUpdates({
+          fromDate,
+          toDate: new Date(Date.now() - 5000).toISOString(), // Subtract 5s to avoid clock sync issues
+          page: 1,
+        });
 
-        if (outboundUpdates.length > 0) {
-          console.log(`[JTLPollingService] Processing ${outboundUpdates.length} outbound updates for client ${config.clientId_fk}`);
-          for (const update of outboundUpdates) {
-            // Process order status updates
-            const outboundId = update.id || (update.data as any)?.outboundId;
-            const outboundData = update.data;
+        if (response.data.length > 0) {
+          this.syncLogger.startBatch();
 
-            if (outboundId && outboundData) {
+          const batchResult: BatchResult = {
+            totalProcessed: 0,
+            updated: 0,
+            unchanged: 0,
+            failed: 0
+          };
+
+          for (const update of response.data) {
+            // API returns raw outbound objects: { outboundId: "...", status: "...", ... }
+            const outboundId = update.outboundId;
+            const outboundData = update;
+
+            if (outboundId) {
               const order = await this.prisma.order.findFirst({
                 where: {
                   clientId: config.clientId_fk,
@@ -1079,24 +1126,49 @@ export class JTLPollingService {
               });
 
               if (order) {
-                console.log(`[JTLPollingService] Outbound ${outboundId} status: ${outboundData.status}`);
-                // Update order with latest status
-                const updateData: any = {
-                  jtlStatus: outboundData.status,
-                };
+                const oldFulfillmentState = order.fulfillmentState;
+                const jtlStatus = outboundData.status;
+                const newFulfillmentState = this.mapFFNStatusToFulfillmentState(jtlStatus);
 
-                // Check for shipping information in the update
-                if (outboundData.status?.toLowerCase() === 'shipped') {
-                  updateData.shippedAt = new Date();
+                // ONLY LOG AND UPDATE IF STATE CHANGED
+                if (SyncLogger.hasStateChanged(oldFulfillmentState, newFulfillmentState)) {
+                  // Update order with latest fulfillment state
+                  const updateData: any = {
+                    fulfillmentState: newFulfillmentState,
+                    lastJtlSync: new Date(),
+                  };
+
+                  // Check for shipping information in the update
+                  if (newFulfillmentState === 'SHIPPED') {
+                    updateData.shippedAt = new Date();
+                  }
+
+                  await this.prisma.order.update({
+                    where: { id: order.id },
+                    data: updateData,
+                  });
+
+                  // Log individual state change
+                  this.syncLogger.logStateChange({
+                    id: order.id,
+                    displayId: order.orderNumber || order.id,
+                    oldState: oldFulfillmentState,
+                    newState: newFulfillmentState
+                  });
+
+                  batchResult.updated++;
+                } else {
+                  // Silent skip for unchanged state
+                  batchResult.unchanged++;
                 }
 
-                await this.prisma.order.update({
-                  where: { id: order.id },
-                  data: updateData,
-                });
+                batchResult.totalProcessed++;
               }
+              // REMOVED: "order not found" logging (normal condition)
             }
           }
+
+          this.syncLogger.logBatchSummary('JTL Polling', batchResult);
         }
       } catch (pollError: any) {
         // Silently handle polling errors - outbound updates are optional

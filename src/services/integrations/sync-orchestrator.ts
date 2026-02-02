@@ -1546,24 +1546,26 @@ export class SyncOrchestrator {
     let itemsFailed = 0;
 
     try {
-      const updates = await this.jtlService.getOutboundUpdates({
-        since: since.toISOString(),
+      const response = await this.jtlService.getOutboundUpdates({
+        fromDate: since.toISOString(),
+        toDate: new Date(Date.now() - 5000).toISOString(), // Subtract 5s to avoid clock sync issues
+        page: 1,
       });
 
-      for (const update of updates) {
+      for (const update of response.data) {
         try {
           // Find order by JTL outbound ID
           const order = await this.prisma.order.findFirst({
-            where: { jtlOutboundId: update.id },
+            where: { jtlOutboundId: update.outboundId },
           });
 
           if (order) {
             // Map JTL status to our order status and fulfillment state
-            const newStatus = this.mapJTLStatusToOrderStatus(update.data.status);
-            const newFulfillmentState = this.mapJTLStatusToFulfillmentState(update.data.status);
-            
-            console.log(`[JTL] Order ${order.id} status update: JTL=${update.data.status} -> status=${newStatus}, fulfillmentState=${newFulfillmentState}`);
-            
+            const newStatus = this.mapJTLStatusToOrderStatus(update.status);
+            const newFulfillmentState = this.mapJTLStatusToFulfillmentState(update.status);
+
+            console.log(`[JTL] Order ${order.id} status update: JTL=${update.status} -> status=${newStatus}, fulfillmentState=${newFulfillmentState}`);
+
             await this.prisma.order.update({
               where: { id: order.id },
               data: {
@@ -1579,7 +1581,7 @@ export class SyncOrchestrator {
             }
 
             results.push({
-              externalId: update.id,
+              externalId: update.outboundId,
               localId: order.id,
               success: true,
               action: 'updated',
@@ -1588,7 +1590,7 @@ export class SyncOrchestrator {
           }
         } catch (error) {
           results.push({
-            externalId: update.id,
+            externalId: update.outboundId,
             success: false,
             error: error instanceof Error ? error.message : 'Unknown error',
             action: 'failed',

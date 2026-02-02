@@ -29,6 +29,7 @@ import { JTLOrderSyncService } from '../integrations/jtl-order-sync.service.js';
 import { ProductSyncService } from '../integrations/product-sync.service.js';
 import { Logger } from '../../utils/logger.js';
 import { generateJobId } from '../../utils/job-id.js';
+import { emitToClient } from '../socket.js';
 
 // ============= TYPES =============
 
@@ -197,6 +198,24 @@ export class QueueWorkerService {
                     duration: Date.now() - startTime
                 });
 
+                // Emit socket event for real-time updates
+                try {
+                    const product = await this.prisma.product.findUnique({
+                        where: { id: productId },
+                        select: { clientId: true }
+                    });
+                    if (product?.clientId) {
+                        emitToClient(product.clientId, 'data:product:synced', {
+                            productId,
+                            platform: 'shopify',
+                            action: 'stock_updated',
+                            timestamp: new Date().toISOString()
+                        });
+                    }
+                } catch (error: any) {
+                    this.logger.warn({ jobId, event: 'emit_failed', error: error.message });
+                }
+
                 return { success: true, details: { action: 'stock_updated' } };
             }
 
@@ -233,6 +252,24 @@ export class QueueWorkerService {
                 action: result.action,
                 syncedPlatforms: result.syncedPlatforms
             });
+
+            // Emit socket event for real-time updates
+            try {
+                const product = await this.prisma.product.findUnique({
+                    where: { id: productId },
+                    select: { clientId: true }
+                });
+                if (product?.clientId) {
+                    emitToClient(product.clientId, 'data:product:synced', {
+                        productId,
+                        platform: 'shopify',
+                        action: result.action || 'updated',
+                        timestamp: new Date().toISOString()
+                    });
+                }
+            } catch (error: any) {
+                this.logger.warn({ jobId, event: 'emit_failed', error: error.message });
+            }
 
             return {
                 success: true,
@@ -279,6 +316,24 @@ export class QueueWorkerService {
                     return { success: false, error: result.error };
                 }
 
+                // Emit socket event for real-time updates
+                try {
+                    const product = await this.prisma.product.findUnique({
+                        where: { id: productId },
+                        select: { clientId: true }
+                    });
+                    if (product?.clientId) {
+                        emitToClient(product.clientId, 'data:product:synced', {
+                            productId,
+                            platform: 'woocommerce',
+                            action: 'stock_updated',
+                            timestamp: new Date().toISOString()
+                        });
+                    }
+                } catch (error: any) {
+                    console.warn('[QueueWorker] Socket emit failed:', error.message);
+                }
+
                 return { success: true, details: { action: 'stock_updated' } };
             }
 
@@ -295,6 +350,24 @@ export class QueueWorkerService {
             if (!result.success) {
                 console.error(`[QueueWorker] Product sync to WooCommerce failed:`, result.error);
                 return { success: false, error: result.error };
+            }
+
+            // Emit socket event for real-time updates
+            try {
+                const product = await this.prisma.product.findUnique({
+                    where: { id: productId },
+                    select: { clientId: true }
+                });
+                if (product?.clientId) {
+                    emitToClient(product.clientId, 'data:product:synced', {
+                        productId,
+                        platform: 'woocommerce',
+                        action: result.action || 'updated',
+                        timestamp: new Date().toISOString()
+                    });
+                }
+            } catch (error: any) {
+                console.warn('[QueueWorker] Socket emit failed:', error.message);
             }
 
             return {
@@ -330,6 +403,24 @@ export class QueueWorkerService {
             if (!result.success) {
                 console.error(`[QueueWorker] Product sync to JTL failed:`, result.error);
                 return { success: false, error: result.error };
+            }
+
+            // Emit socket event for real-time updates
+            try {
+                const product = await this.prisma.product.findUnique({
+                    where: { id: productId },
+                    select: { clientId: true }
+                });
+                if (product?.clientId) {
+                    emitToClient(product.clientId, 'data:product:synced', {
+                        productId,
+                        platform: 'jtl',
+                        action: result.action || 'updated',
+                        timestamp: new Date().toISOString()
+                    });
+                }
+            } catch (error: any) {
+                console.warn('[QueueWorker] Socket emit failed:', error.message);
             }
 
             return {
@@ -406,6 +497,24 @@ export class QueueWorkerService {
                         return { success: false, error: syncResult.error };
                     }
                     console.log(`[QueueWorker] FFN sync SUCCESS for ${orderId}, outboundId: ${syncResult.outboundId}`);
+
+                    // Emit socket event for real-time updates
+                    try {
+                        const order = await this.prisma.order.findUnique({
+                            where: { id: orderId },
+                            select: { clientId: true, orderId: true }
+                        });
+                        if (order?.clientId) {
+                            emitToClient(order.clientId, 'data:order:synced', {
+                                orderId: order.orderId,
+                                operation,
+                                platform: 'ffn',
+                                timestamp: new Date().toISOString()
+                            });
+                        }
+                    } catch (error: any) {
+                        console.warn('[QueueWorker] Socket emit failed:', error.message);
+                    }
                     break;
 
                 case 'cancel':
@@ -416,6 +525,22 @@ export class QueueWorkerService {
                         return { success: false, error: cancelResult.error };
                     }
                     console.log(`[QueueWorker] FFN cancel SUCCESS for ${orderId}`);
+
+                    // Emit socket event for real-time updates
+                    try {
+                        const order = await this.prisma.order.findUnique({
+                            where: { id: orderId },
+                            select: { clientId: true, orderId: true }
+                        });
+                        if (order?.clientId) {
+                            emitToClient(order.clientId, 'data:order:cancelled', {
+                                orderId: order.orderId,
+                                timestamp: new Date().toISOString()
+                            });
+                        }
+                    } catch (error: any) {
+                        console.warn('[QueueWorker] Socket emit failed:', error.message);
+                    }
                     break;
 
                 case 'fulfill':
@@ -465,6 +590,20 @@ export class QueueWorkerService {
                 return { success: false, error: result.error };
             }
 
+            // Emit socket event for real-time updates
+            try {
+                if (order.clientId) {
+                    emitToClient(order.clientId, 'data:order:synced', {
+                        orderId: order.orderId,
+                        operation,
+                        platform: 'commerce',
+                        timestamp: new Date().toISOString()
+                    });
+                }
+            } catch (error: any) {
+                console.warn('[QueueWorker] Socket emit failed:', error.message);
+            }
+
             return { success: true };
         } catch (error: any) {
             console.error(`[QueueWorker] Order sync to commerce failed:`, error);
@@ -489,6 +628,22 @@ export class QueueWorkerService {
             const commerceResult = await this.orderSyncService.syncOperationalToCommerce(orderId, 'cancel');
             if (!commerceResult.success) {
                 console.warn(`[QueueWorker] Commerce cancellation failed: ${commerceResult.error}`);
+            }
+
+            // Emit socket event for real-time updates
+            try {
+                const order = await this.prisma.order.findUnique({
+                    where: { id: orderId },
+                    select: { clientId: true, orderId: true }
+                });
+                if (order?.clientId) {
+                    emitToClient(order.clientId, 'data:order:cancelled', {
+                        orderId: order.orderId,
+                        timestamp: new Date().toISOString()
+                    });
+                }
+            } catch (error: any) {
+                console.warn('[QueueWorker] Socket emit failed:', error.message);
             }
 
             return { success: true };
@@ -581,6 +736,19 @@ export class QueueWorkerService {
                     return { success: false, error: `Unknown operation: ${operation}` };
             }
 
+            // Emit socket event for real-time updates
+            try {
+                if (returnRecord.clientId) {
+                    emitToClient(returnRecord.clientId, 'data:return:synced', {
+                        returnId: returnRecord.returnId,
+                        operation,
+                        timestamp: new Date().toISOString()
+                    });
+                }
+            } catch (error: any) {
+                console.warn('[QueueWorker] Socket emit failed:', error.message);
+            }
+
             return { success: true };
         } catch (error: any) {
             console.error(`[QueueWorker] Return sync to commerce failed:`, error);
@@ -635,6 +803,19 @@ export class QueueWorkerService {
                     restockDecidedAt: new Date(),
                 },
             });
+
+            // Emit socket event for real-time updates
+            try {
+                if (returnRecord.clientId) {
+                    emitToClient(returnRecord.clientId, 'data:return:restocked', {
+                        returnId: returnRecord.returnId,
+                        productsUpdated: returnRecord.items.length,
+                        timestamp: new Date().toISOString()
+                    });
+                }
+            } catch (error: any) {
+                console.warn('[QueueWorker] Socket emit failed:', error.message);
+            }
 
             return { success: true };
         } catch (error: any) {

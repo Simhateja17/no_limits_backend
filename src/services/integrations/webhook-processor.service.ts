@@ -11,6 +11,7 @@
 
 import { PrismaClient, ChannelType, OrderStatus, ReturnStatus } from '@prisma/client';
 import { SyncQueueProcessor } from './sync-queue-processor.service.js';
+import { Logger } from '../../utils/logger.js';
 
 // ============= TYPES =============
 
@@ -188,6 +189,7 @@ interface WooCommerceRefundPayload {
 export class WebhookProcessorService {
   private prisma: PrismaClient;
   private syncQueueProcessor: SyncQueueProcessor | null;
+  private logger = new Logger('WebhookProcessor');
 
   constructor(prisma: PrismaClient, syncQueueProcessor?: SyncQueueProcessor) {
     this.prisma = prisma;

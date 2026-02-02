@@ -802,27 +802,32 @@ export function createSyncAdminRoutes(prisma: PrismaClient): Router {
       });
 
       let totalUpdates = 0;
-      const results: { clientId: string; clientName: string; updates: number; error?: string }[] = [];
+      let totalUnchanged = 0;
+      const results: { clientId: string; clientName: string; updates: number; unchanged?: number; error?: string }[] = [];
 
       for (const client of clientsWithJtl) {
         try {
           const result = await jtlOrderSyncService.pollFFNUpdates(
             client.id,
-            since ? new Date(since) : undefined
+            since ? new Date(since) : undefined,
+            true  // verbose=true for manual sync
           );
-          
+
           if (result.success) {
             totalUpdates += result.updatesProcessed || 0;
+            totalUnchanged += result.unchanged || 0;
             results.push({
               clientId: client.id,
               clientName: client.name,
-              updates: result.updatesProcessed || 0
+              updates: result.updatesProcessed || 0,
+              unchanged: result.unchanged || 0
             });
           } else {
             results.push({
               clientId: client.id,
               clientName: client.name,
               updates: 0,
+              unchanged: 0,
               error: result.error
             });
           }
@@ -831,6 +836,7 @@ export function createSyncAdminRoutes(prisma: PrismaClient): Router {
             clientId: client.id,
             clientName: client.name,
             updates: 0,
+            unchanged: 0,
             error: clientError.message
           });
         }
@@ -842,7 +848,10 @@ export function createSyncAdminRoutes(prisma: PrismaClient): Router {
       res.json({
         success: !hasErrors,
         updatesProcessed: totalUpdates,
-        message: `Processed ${totalUpdates} updates from JTL-FFN across ${clientsWithJtl.length} clients`,
+        unchangedOrders: totalUnchanged,
+        message: totalUpdates > 0
+          ? `✅ Updated ${totalUpdates} order(s). ${totalUnchanged} order(s) unchanged.`
+          : `No status changes found in JTL. ${totalUnchanged} order(s) already up to date.`,
         details: results,
       });
     } catch (error: any) {
@@ -860,7 +869,8 @@ export function createSyncAdminRoutes(prisma: PrismaClient): Router {
 
       const result = await jtlOrderSyncService.pollFFNUpdates(
         clientId,
-        since ? new Date(since) : undefined
+        since ? new Date(since) : undefined,
+        true  // verbose=true for manual sync
       );
 
       if (result.success) {
@@ -868,11 +878,53 @@ export function createSyncAdminRoutes(prisma: PrismaClient): Router {
           success: true,
           clientId,
           updatesProcessed: result.updatesProcessed,
-          message: `Processed ${result.updatesProcessed} updates from JTL-FFN`,
+          unchangedOrders: result.unchanged || 0,
+          message: result.updatesProcessed > 0
+            ? `✅ Updated ${result.updatesProcessed} order(s). ${result.unchanged || 0} order(s) unchanged.`
+            : `No status changes found in JTL. ${result.unchanged || 0} order(s) already up to date.`,
         });
       } else {
         res.status(400).json({ success: false, error: result.error });
       }
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  /**
+   * Fetch orders from commerce channels and reconcile with JTL FFN
+   * This recovers orders that may have been missed due to webhook failures
+   */
+  router.post('/clients/:clientId/fetch-orders', authMiddleware, async (req: Request, res: Response) => {
+    try {
+      const { clientId } = req.params;
+      const { since } = req.body; // ISO date string, defaults to 7 days ago
+
+      // Authorization check: CLIENT role can only fetch for their own clientId
+      const user = (req as any).user;
+      if (user?.role === 'CLIENT' && user?.clientId !== clientId) {
+        res.status(403).json({
+          success: false,
+          error: 'You can only fetch orders for your own account',
+        });
+        return;
+      }
+
+      const result = await jtlOrderSyncService.fetchAndReconcileOrders(
+        clientId,
+        since ? new Date(since) : undefined
+      );
+
+      res.json({
+        success: result.success,
+        stats: result.stats,
+        message: result.success
+          ? `✅ Found ${result.stats.ordersFoundInChannel} orders. Created ${result.stats.newOrdersCreated} new, ` +
+            `linked ${result.stats.ordersLinkedToFFN} to FFN, pushed ${result.stats.ordersPushedToFFN} to FFN. ` +
+            `${result.stats.ordersAlreadyExisted} already existed.`
+          : result.error,
+        error: result.error,
+      });
     } catch (error: any) {
       res.status(500).json({ success: false, error: error.message });
     }

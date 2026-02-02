@@ -11,10 +11,13 @@
  * - Sync fulfillment/tracking info back to commerce platforms
  */
 
-import { PrismaClient, Order, SyncOrigin, FulfillmentState } from '@prisma/client';
+import { PrismaClient, Order, SyncOrigin, FulfillmentState, Prisma } from '@prisma/client';
 import { JTLService } from './jtl.service.js';
 import { JTLOutbound } from './types.js';
 import { getEncryptionService } from '../encryption.service.js';
+import { SyncLogger } from '../../utils/sync-logger.js';
+import { createShopifyServiceAuto } from './shopify-service-factory.js';
+import { WooCommerceService } from './woocommerce.service.js';
 
 // ============= TYPES =============
 
@@ -39,9 +42,20 @@ interface FFNOutboundUpdate {
     }>;
 }
 
+export interface FetchOrdersStats {
+    ordersFoundInChannel: number;
+    newOrdersCreated: number;
+    ordersAlreadyExisted: number;
+    ordersLinkedToFFN: number;
+    ordersPushedToFFN: number;
+    errors: number;
+}
+
 // ============= SERVICE =============
 
 export class JTLOrderSyncService {
+    private syncLogger = new SyncLogger('JTL-FFN-SYNC');
+
     constructor(private prisma: PrismaClient) { }
 
     /**
@@ -53,7 +67,6 @@ export class JTLOrderSyncService {
         });
 
         if (!jtlConfig || !jtlConfig.isActive) {
-            console.log(`[JTL] No active JTL config for client ${clientId}`);
             return null;
         }
 
@@ -79,9 +92,6 @@ export class JTLOrderSyncService {
         outboundId?: string;
         error?: string;
     }> {
-        const startTime = Date.now();
-        console.log(`[JTL-FFN-SYNC] ========== START: Syncing order ${orderId} to JTL-FFN ==========`);
-        
         try {
             const order = await this.prisma.order.findUnique({
                 where: { id: orderId },
@@ -92,72 +102,39 @@ export class JTLOrderSyncService {
             });
 
             if (!order) {
-                console.log(`[JTL-FFN-SYNC] ERROR: Order ${orderId} not found in database`);
                 throw new Error(`Order ${orderId} not found`);
             }
 
-            console.log(`[JTL-FFN-SYNC] Order details:`, {
-                orderId: order.id,
-                orderNumber: order.orderNumber,
-                externalOrderId: order.externalOrderId,
-                customerEmail: order.customerEmail,
-                origin: order.orderOrigin,
-                itemCount: order.items.length,
-                total: order.total?.toString(),
-                clientId: order.clientId,
-            });
-
             // Don't sync cancelled orders
             if (order.isCancelled) {
-                console.log(`[JTL-FFN-SYNC] SKIPPED: Order ${orderId} is cancelled - not syncing to FFN`);
                 return { success: true };
             }
 
             // Get JTL config
-            console.log(`[JTL-FFN-SYNC] Getting JTL config for client ${order.clientId}...`);
             const jtlConfig = await this.prisma.jtlConfig.findUnique({
                 where: { clientId_fk: order.clientId },
             });
 
             if (!jtlConfig || !jtlConfig.isActive) {
-                console.log(`[JTL-FFN-SYNC] ERROR: JTL not configured or inactive for client ${order.clientId}`);
                 return { success: false, error: 'JTL not configured for this client' };
             }
 
             // Get JTL service
-            console.log(`[JTL-FFN-SYNC] Getting JTL service for client ${order.clientId}...`);
             const jtlService = await this.getJTLService(order.clientId);
             if (!jtlService) {
-                console.log(`[JTL-FFN-SYNC] ERROR: JTL service initialization failed for client ${order.clientId}`);
                 return { success: false, error: 'JTL not configured for this client' };
             }
-            console.log(`[JTL-FFN-SYNC] JTL service initialized successfully`);
 
             // Check if already synced
             if (order.jtlOutboundId) {
-                console.log(`[JTL-FFN-SYNC] ALREADY SYNCED: Order ${orderId} already exists as outbound ${order.jtlOutboundId}`);
                 return { success: true, outboundId: order.jtlOutboundId };
             }
 
-            // Transform order to JTL outbound format
-            console.log(`[JTL-FFN-SYNC] Transforming order to JTL outbound format...`);
+            // Transform and create outbound
             const outbound = this.transformOrderToOutbound(order, jtlConfig);
-            console.log(`[JTL-FFN-SYNC] Outbound payload prepared:`, {
-                merchantOutboundNumber: outbound.merchantOutboundNumber,
-                itemCount: outbound.items?.length,
-                shippingCountry: (outbound.shippingAddress as any)?.country,
-            });
-
-            // Create outbound in JTL-FFN
-            console.log(`[JTL-FFN-SYNC] Sending order to JTL-FFN API...`);
             const result = await jtlService.createOutbound(outbound);
-            console.log(`[JTL-FFN-SYNC] JTL-FFN API response:`, {
-                success: true,
-                outboundId: result.outboundId,
-            });
 
             // Update order with JTL IDs
-            console.log(`[JTL-FFN-SYNC] Updating order ${orderId} with JTL outbound ID...`);
             await this.prisma.order.update({
                 where: { id: orderId },
                 data: {
@@ -181,25 +158,22 @@ export class JTLOrderSyncService {
                 },
             });
 
-            const duration = Date.now() - startTime;
-            console.log(`[JTL-FFN-SYNC] ========== SUCCESS: Order ${orderId} synced to FFN ==========`);
-            console.log(`[JTL-FFN-SYNC] Summary:`, {
+            // ONLY LOG FINAL SUCCESS
+            this.syncLogger.getLogger().info({
+                event: 'order_synced_to_ffn',
                 orderId,
                 orderNumber: order.orderNumber,
                 outboundId: result.outboundId,
-                duration: `${duration}ms`,
-                syncStatus: 'SYNCED',
+                status: 'success'
             });
 
             return { success: true, outboundId: result.outboundId };
         } catch (error: any) {
-            const duration = Date.now() - startTime;
-            console.error(`[JTL-FFN-SYNC] ========== FAILED: Order ${orderId} sync failed ==========`);
-            console.error(`[JTL-FFN-SYNC] Error details:`, {
+            this.syncLogger.getLogger().error({
+                event: 'ffn_sync_failed',
                 orderId,
                 error: error.message,
-                stack: error.stack,
-                duration: `${duration}ms`,
+                stack: error.stack
             });
 
             // Log failed sync
@@ -244,7 +218,6 @@ export class JTLOrderSyncService {
             }
 
             if (!order.jtlOutboundId) {
-                console.log(`[JTL] Order ${orderId} not synced to FFN, nothing to cancel`);
                 return { success: true };
             }
 
@@ -276,11 +249,20 @@ export class JTLOrderSyncService {
                 },
             });
 
-            console.log(`[JTL] Order ${orderId} cancelled in FFN`);
+            this.syncLogger.getLogger().info({
+                event: 'order_cancelled_in_ffn',
+                orderId,
+                orderNumber: order.orderNumber,
+                outboundId: order.jtlOutboundId
+            });
 
             return { success: true };
         } catch (error: any) {
-            console.error(`[JTL] Failed to cancel order ${orderId}:`, error);
+            this.syncLogger.getLogger().error({
+                event: 'ffn_cancel_failed',
+                orderId,
+                error: error instanceof Error ? error.message : 'Unknown error'
+            });
             return { success: false, error: error.message };
         }
     }
@@ -337,21 +319,31 @@ export class JTLOrderSyncService {
                 },
             });
 
-            console.log(`[JTL] Split order ${splitOrderId} synced to FFN as outbound ${result.outboundId}`);
+            this.syncLogger.getLogger().info({
+                event: 'split_order_synced',
+                splitOrderId,
+                outboundId: result.outboundId
+            });
 
             return { success: true, outboundId: result.outboundId };
         } catch (error: any) {
-            console.error(`[JTL] Failed to create fulfillment order ${splitOrderId}:`, error);
+            this.syncLogger.getLogger().error({
+                event: 'split_order_sync_failed',
+                splitOrderId,
+                error: error instanceof Error ? error.message : 'Unknown error'
+            });
             return { success: false, error: error.message };
         }
     }
 
     /**
      * Poll FFN for outbound updates and sync to platform
+     * @param verbose - If true, logs detailed progress (for manual syncs). If false, only logs errors (for background polling)
      */
-    async pollFFNUpdates(clientId: string, since?: Date): Promise<{
+    async pollFFNUpdates(clientId: string, since?: Date, verbose: boolean = false): Promise<{
         success: boolean;
         updatesProcessed: number;
+        unchanged?: number;
         error?: string;
     }> {
         try {
@@ -360,25 +352,77 @@ export class JTLOrderSyncService {
                 return { success: false, updatesProcessed: 0, error: 'JTL not configured' };
             }
 
+            // Log start for manual syncs
+            if (verbose) {
+                this.syncLogger.getLogger().info({
+                    event: 'manual_sync_started',
+                    clientId,
+                    since: since?.toISOString()
+                });
+            }
+
             // Get updates since last poll
-            const sinceStr = since
+            const fromDate = since
                 ? since.toISOString()
                 : new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(); // Default: last 24 hours
+            // Subtract 5 seconds to avoid clock sync issues with JTL API
+            // API rejects requests where toDate > API server's current time
+            const toDate = new Date(Date.now() - 5000).toISOString();
 
-            const updates = await jtlService.getOutboundUpdates({
-                since: sinceStr,
-                limit: 100,
+            const response = await jtlService.getOutboundUpdates({
+                fromDate,
+                toDate,
+                page: 1,
+                ignoreOwnApplicationId: false,
+                ignoreOwnUserId: false,
             });
 
-            console.log(`[JTL] Processing ${updates.length} outbound updates for client ${clientId}`);
+            const updates = response.data || [];
+
+            // PHASE 1 DEBUG: Log raw API response to understand format
+            console.log('[JTL-SYNC-DEBUG] ========================================');
+            console.log('[JTL-SYNC-DEBUG] Raw API response:', JSON.stringify(updates, null, 2));
+            console.log('[JTL-SYNC-DEBUG] Response type:', typeof updates);
+            console.log('[JTL-SYNC-DEBUG] Is array:', Array.isArray(updates));
+            console.log('[JTL-SYNC-DEBUG] Count:', updates.length);
+
+            if (updates.length > 0) {
+                console.log('[JTL-SYNC-DEBUG] First update structure:', JSON.stringify(updates[0], null, 2));
+                console.log('[JTL-SYNC-DEBUG] First update keys:', Object.keys(updates[0]));
+            }
+
+            // Log updates fetched for manual syncs
+            if (verbose) {
+                this.syncLogger.getLogger().info({
+                    event: 'updates_fetched',
+                    count: updates.length
+                });
+            }
 
             let processed = 0;
+            let unchanged = 0;
 
             for (const update of updates) {
+                // PHASE 1 DEBUG: Log each update being processed
+                console.log('[JTL-SYNC-DEBUG] ----------------------------------------');
+                console.log('[JTL-SYNC-DEBUG] Processing update:', JSON.stringify(update, null, 2));
+
+                // API returns raw outbound objects: { outboundId: "...", status: "...", ... }
+                const outboundId = update.outboundId;
+                const outboundData = update;
+
+                if (!outboundId) {
+                    console.log('[JTL-SYNC-DEBUG] ❌ SKIPPING - No outboundId');
+                    continue;
+                }
+
+                console.log('[JTL-SYNC-DEBUG] ✓ Extracted outboundId:', outboundId);
+                console.log('[JTL-SYNC-DEBUG] ✓ Status from data:', outboundData.status);
+
                 const order = await this.prisma.order.findFirst({
                     where: {
                         clientId,
-                        jtlOutboundId: update.data.outboundId,
+                        jtlOutboundId: outboundId,
                     },
                     include: {
                         channel: true,
@@ -386,67 +430,264 @@ export class JTLOrderSyncService {
                 });
 
                 if (!order) {
-                    console.log(`[JTL] No order found for outbound ${update.data.outboundId}`);
+                    console.log('[JTL-SYNC-DEBUG] ⚠️  No order found with jtlOutboundId:', outboundId);
                     continue;
                 }
 
+                console.log('[JTL-SYNC-DEBUG] ✓ Found order:', order.orderNumber || order.orderId);
+
                 // Map FFN status to fulfillment state
-                const fulfillmentState = this.mapFFNStatusToFulfillmentState(update.data.status);
+                const oldState = order.fulfillmentState;
+                const newState = this.mapFFNStatusToFulfillmentState(outboundData.status);
 
-                // Fetch detailed outbound data if status is 'shipped'
-                let trackingNumber: string | undefined;
-                let shippedAt: Date | undefined;
+                console.log('[JTL-SYNC-DEBUG] FFN status from API:', outboundData.status);
+                console.log('[JTL-SYNC-DEBUG] Old state in DB:', oldState);
+                console.log('[JTL-SYNC-DEBUG] New state (mapped):', newState);
+                console.log('[JTL-SYNC-DEBUG] State changed?', oldState !== newState);
 
-                if (fulfillmentState === 'SHIPPED') {
-                    try {
-                        const outboundDetail = await jtlService.getOutbound(update.data.outboundId);
-                        // Extract tracking info from detail if available
-                        trackingNumber = (outboundDetail as any).trackingNumber;
-                        shippedAt = (outboundDetail as any).shippedAt
-                            ? new Date((outboundDetail as any).shippedAt)
-                            : new Date();
-                    } catch (e) {
-                        console.warn(`[JTL] Could not fetch outbound detail for ${update.data.outboundId}`);
+                // ONLY UPDATE IF STATE CHANGED
+                if (oldState !== newState) {
+                    // Fetch detailed outbound data if status is 'shipped'
+                    let trackingNumber: string | undefined;
+                    let shippedAt: Date | undefined;
+
+                    if (newState === 'SHIPPED') {
+                        try {
+                            const outboundDetail = await jtlService.getOutbound(outboundId);
+                            // Extract tracking info from detail if available
+                            trackingNumber = (outboundDetail as any).trackingNumber;
+                            shippedAt = (outboundDetail as any).shippedAt
+                                ? new Date((outboundDetail as any).shippedAt)
+                                : new Date();
+                        } catch (e) {
+                            // Silently ignore - tracking info is optional
+                        }
+                    }
+
+                    // Update order
+                    await this.prisma.order.update({
+                        where: { id: order.id },
+                        data: {
+                            fulfillmentState: newState,
+                            trackingNumber: trackingNumber || order.trackingNumber,
+                            shippedAt: shippedAt || order.shippedAt,
+                            lastJtlSync: new Date(),
+                            lastOperationalUpdateBy: 'JTL',
+                            lastOperationalUpdateAt: new Date(),
+                        },
+                    });
+
+                    // Log update
+                    await this.prisma.orderSyncLog.create({
+                        data: {
+                            orderId: order.id,
+                            action: 'update',
+                            origin: 'JTL',
+                            targetPlatform: 'nolimits',
+                            success: true,
+                            changedFields: ['fulfillmentState', 'trackingNumber', 'shippedAt'],
+                        },
+                    });
+
+                    // Log state change for manual syncs
+                    if (verbose) {
+                        this.syncLogger.logStateChange({
+                            id: order.id,
+                            displayId: order.orderNumber || order.orderId,
+                            oldState,
+                            newState
+                        });
+                    }
+
+                    // If shipped, sync tracking to commerce platform
+                    if (newState === 'SHIPPED' && trackingNumber && order.channel) {
+                        await this.queueCommerceTrackingSync(order.id, trackingNumber);
+                    }
+
+                    processed++;
+                } else {
+                    console.log('[JTL-SYNC-DEBUG] ℹ️  State unchanged - not updating');
+                    // State unchanged - just update lastJtlSync timestamp
+                    await this.prisma.order.update({
+                        where: { id: order.id },
+                        data: {
+                            lastJtlSync: new Date(),
+                        },
+                    });
+                    unchanged++;
+                }
+            }
+
+            // Handle pagination - fetch additional pages if more data is available
+            if (response.moreDataAvailable) {
+                let currentPage = 1;
+                let hasMoreData: boolean = response.moreDataAvailable;
+                const maxPages = 10; // Safety limit to prevent infinite loops
+
+                console.log('[JTL-SYNC-DEBUG] More data available, fetching additional pages...');
+
+                while (hasMoreData && currentPage < maxPages) {
+                    currentPage++;
+
+                    console.log(`[JTL-SYNC-DEBUG] Fetching page ${currentPage}...`);
+
+                    const pageResponse = await jtlService.getOutboundUpdates({
+                        fromDate,
+                        toDate,
+                        page: currentPage,
+                        ignoreOwnApplicationId: false,
+                        ignoreOwnUserId: false,
+                    });
+
+                    const pageUpdates = pageResponse.data || [];
+                    console.log(`[JTL-SYNC-DEBUG] Page ${currentPage} returned ${pageUpdates.length} updates`);
+
+                    // Process updates from this page using the same logic
+                    for (const update of pageUpdates) {
+                        console.log('[JTL-SYNC-DEBUG] ----------------------------------------');
+                        console.log('[JTL-SYNC-DEBUG] Processing update:', JSON.stringify(update, null, 2));
+
+                        // API returns raw outbound objects: { outboundId: "...", status: "...", ... }
+                        const outboundId = update.outboundId;
+                        const outboundData = update;
+
+                        if (!outboundId) {
+                            console.log('[JTL-SYNC-DEBUG] ❌ SKIPPING - No outboundId');
+                            continue;
+                        }
+
+                        console.log('[JTL-SYNC-DEBUG] ✓ Extracted outboundId:', outboundId);
+                        console.log('[JTL-SYNC-DEBUG] ✓ Status from data:', outboundData.status);
+
+                        const order = await this.prisma.order.findFirst({
+                            where: {
+                                clientId,
+                                jtlOutboundId: outboundId,
+                            },
+                            include: {
+                                channel: true,
+                            },
+                        });
+
+                        if (!order) {
+                            console.log('[JTL-SYNC-DEBUG] ⚠️  No order found with jtlOutboundId:', outboundId);
+                            continue;
+                        }
+
+                        console.log('[JTL-SYNC-DEBUG] ✓ Found order:', order.orderNumber || order.orderId);
+
+                        const oldState = order.fulfillmentState;
+                        const newState = this.mapFFNStatusToFulfillmentState(outboundData.status);
+
+                        console.log('[JTL-SYNC-DEBUG] FFN status from API:', outboundData.status);
+                        console.log('[JTL-SYNC-DEBUG] Old state in DB:', oldState);
+                        console.log('[JTL-SYNC-DEBUG] New state (mapped):', newState);
+                        console.log('[JTL-SYNC-DEBUG] State changed?', oldState !== newState);
+
+                        if (oldState !== newState) {
+                            let trackingNumber: string | undefined;
+                            let shippedAt: Date | undefined;
+
+                            if (newState === 'SHIPPED') {
+                                try {
+                                    const outboundDetail = await jtlService.getOutbound(outboundId);
+                                    trackingNumber = (outboundDetail as any).trackingNumber;
+                                    shippedAt = (outboundDetail as any).shippedAt
+                                        ? new Date((outboundDetail as any).shippedAt)
+                                        : new Date();
+                                } catch (e) {
+                                    // Silently ignore - tracking info is optional
+                                }
+                            }
+
+                            await this.prisma.order.update({
+                                where: { id: order.id },
+                                data: {
+                                    fulfillmentState: newState,
+                                    trackingNumber: trackingNumber || order.trackingNumber,
+                                    shippedAt: shippedAt || order.shippedAt,
+                                    lastJtlSync: new Date(),
+                                    lastOperationalUpdateBy: 'JTL',
+                                    lastOperationalUpdateAt: new Date(),
+                                },
+                            });
+
+                            await this.prisma.orderSyncLog.create({
+                                data: {
+                                    orderId: order.id,
+                                    action: 'update',
+                                    origin: 'JTL',
+                                    targetPlatform: 'nolimits',
+                                    success: true,
+                                    changedFields: ['fulfillmentState', 'trackingNumber', 'shippedAt'],
+                                },
+                            });
+
+                            if (verbose) {
+                                this.syncLogger.logStateChange({
+                                    id: order.id,
+                                    displayId: order.orderNumber || order.orderId,
+                                    oldState,
+                                    newState
+                                });
+                            }
+
+                            if (newState === 'SHIPPED' && trackingNumber && order.channel) {
+                                await this.queueCommerceTrackingSync(order.id, trackingNumber);
+                            }
+
+                            processed++;
+                        } else {
+                            console.log('[JTL-SYNC-DEBUG] ℹ️  State unchanged - not updating');
+                            await this.prisma.order.update({
+                                where: { id: order.id },
+                                data: {
+                                    lastJtlSync: new Date(),
+                                },
+                            });
+                            unchanged++;
+                        }
+                    }
+
+                    // Check if there are more pages
+                    hasMoreData = pageResponse.moreDataAvailable;
+                    if (!hasMoreData) {
+                        console.log('[JTL-SYNC-DEBUG] No more pages available');
                     }
                 }
 
-                // Update order
-                await this.prisma.order.update({
-                    where: { id: order.id },
-                    data: {
-                        fulfillmentState,
-                        trackingNumber: trackingNumber || order.trackingNumber,
-                        shippedAt: shippedAt || order.shippedAt,
-                        lastJtlSync: new Date(),
-                        lastOperationalUpdateBy: 'JTL',
-                        lastOperationalUpdateAt: new Date(),
-                    },
-                });
-
-                // Log update
-                await this.prisma.orderSyncLog.create({
-                    data: {
-                        orderId: order.id,
-                        action: 'update',
-                        origin: 'JTL',
-                        targetPlatform: 'nolimits',
-                        success: true,
-                        changedFields: ['fulfillmentState', 'trackingNumber', 'shippedAt'],
-                    },
-                });
-
-                // If shipped, sync tracking to commerce platform
-                if (fulfillmentState === 'SHIPPED' && trackingNumber && order.channel) {
-                    await this.queueCommerceTrackingSync(order.id, trackingNumber);
+                if (currentPage >= maxPages && hasMoreData) {
+                    console.log(`[JTL-SYNC-DEBUG] ⚠️  Reached max page limit (${maxPages}), there may be more data`);
                 }
-
-                processed++;
             }
 
-            return { success: true, updatesProcessed: processed };
+            // PHASE 1 DEBUG: Summary
+            console.log('[JTL-SYNC-DEBUG] ========================================');
+            console.log('[JTL-SYNC-DEBUG] SYNC SUMMARY:');
+            console.log('[JTL-SYNC-DEBUG] Total updates received:', updates.length);
+            console.log('[JTL-SYNC-DEBUG] Orders updated:', processed);
+            console.log('[JTL-SYNC-DEBUG] Orders unchanged:', unchanged);
+            console.log('[JTL-SYNC-DEBUG] ========================================');
+
+            // Log completion summary for manual syncs (always) or background syncs (only if changes)
+            if (verbose || processed > 0) {
+                this.syncLogger.getLogger().info({
+                    event: 'sync_completed',
+                    updatesChecked: updates.length,
+                    ordersUpdated: processed,
+                    ordersUnchanged: unchanged,
+                    clientId
+                });
+            }
+
+            return { success: true, updatesProcessed: processed, unchanged: unchanged };
         } catch (error: any) {
-            console.error(`[JTL] Failed to poll FFN updates:`, error);
-            return { success: false, updatesProcessed: 0, error: error.message };
+            this.syncLogger.getLogger().error({
+                event: 'ffn_poll_failed',
+                clientId,
+                error: error instanceof Error ? error.message : 'Unknown error'
+            });
+            return { success: false, updatesProcessed: 0, unchanged: 0, error: error.message };
         }
     }
 
@@ -563,10 +804,392 @@ export class JTLOrderSyncService {
                 }
             );
 
-            console.log(`[JTL] Queued commerce tracking sync for order ${orderId}`);
         } catch (error) {
-            console.error(`[JTL] Failed to queue commerce tracking sync:`, error);
+            this.syncLogger.getLogger().error({
+                event: 'queue_tracking_sync_failed',
+                orderId,
+                error: error instanceof Error ? error.message : 'Unknown error'
+            });
         }
+    }
+
+    /**
+     * Fetch orders from commerce channels and reconcile with JTL FFN
+     * This recovers orders that may have been missed due to webhook failures
+     *
+     * Flow:
+     * 1. Fetch orders from Shopify/WooCommerce (last 7 days by default)
+     * 2. For each order:
+     *    - Already in DB? Skip (mark as existing)
+     *    - Not in DB? Create order, then:
+     *      - Exists in JTL FFN? Link (set jtlOutboundId)
+     *      - Not in JTL FFN? Push to FFN
+     * 3. Return stats
+     */
+    async fetchAndReconcileOrders(
+        clientId: string,
+        since?: Date
+    ): Promise<{
+        success: boolean;
+        stats: FetchOrdersStats;
+        error?: string;
+    }> {
+        const stats: FetchOrdersStats = {
+            ordersFoundInChannel: 0,
+            newOrdersCreated: 0,
+            ordersAlreadyExisted: 0,
+            ordersLinkedToFFN: 0,
+            ordersPushedToFFN: 0,
+            errors: 0,
+        };
+
+        try {
+            this.syncLogger.getLogger().info({
+                event: 'fetch_orders_started',
+                clientId,
+                since: since?.toISOString() || '7 days ago'
+            });
+
+            // Default to 7 days ago if no date specified
+            const sinceDate = since || new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+            // Get client's active channels
+            const channels = await this.prisma.channel.findMany({
+                where: {
+                    clientId,
+                    isActive: true,
+                },
+            });
+
+            if (channels.length === 0) {
+                return {
+                    success: false,
+                    stats,
+                    error: 'No active channels found for this client',
+                };
+            }
+
+            // Get JTL service for this client
+            const jtlService = await this.getJTLService(clientId);
+            if (!jtlService) {
+                return {
+                    success: false,
+                    stats,
+                    error: 'JTL FFN not configured for this client',
+                };
+            }
+
+            // Get JTL config for warehouse/fulfiller IDs
+            const jtlConfig = await this.prisma.jtlConfig.findUnique({
+                where: { clientId_fk: clientId },
+            });
+
+            if (!jtlConfig) {
+                return {
+                    success: false,
+                    stats,
+                    error: 'JTL configuration not found',
+                };
+            }
+
+            const encryptionService = getEncryptionService();
+
+            // Process each channel
+            for (const channel of channels) {
+                try {
+                    let channelOrders: any[] = [];
+
+                    // Fetch orders from channel based on type
+                    if (channel.type === 'SHOPIFY' && channel.shopDomain && channel.accessToken) {
+                        const shopifyService = createShopifyServiceAuto({
+                            shopDomain: channel.shopDomain,
+                            accessToken: encryptionService.safeDecrypt(channel.accessToken),
+                        });
+
+                        channelOrders = await shopifyService.getOrdersCreatedSince(sinceDate);
+                        this.syncLogger.getLogger().info({
+                            event: 'shopify_orders_fetched',
+                            channelId: channel.id,
+                            count: channelOrders.length,
+                        });
+
+                    } else if (channel.type === 'WOOCOMMERCE' && channel.apiClientId && channel.apiClientSecret) {
+                        const wooService = new WooCommerceService({
+                            url: channel.url || '',
+                            consumerKey: encryptionService.safeDecrypt(channel.apiClientId),
+                            consumerSecret: encryptionService.safeDecrypt(channel.apiClientSecret),
+                        });
+
+                        channelOrders = await wooService.getOrdersCreatedSince(sinceDate);
+                        this.syncLogger.getLogger().info({
+                            event: 'woocommerce_orders_fetched',
+                            channelId: channel.id,
+                            count: channelOrders.length,
+                        });
+                    }
+
+                    stats.ordersFoundInChannel += channelOrders.length;
+
+                    // Process each order
+                    for (const channelOrder of channelOrders) {
+                        try {
+                            await this.processChannelOrder(
+                                channelOrder,
+                                channel,
+                                jtlService,
+                                jtlConfig,
+                                stats
+                            );
+                        } catch (orderError: any) {
+                            this.syncLogger.getLogger().error({
+                                event: 'order_processing_error',
+                                orderId: channelOrder.id || channelOrder.name,
+                                error: orderError.message,
+                            });
+                            stats.errors++;
+                        }
+                    }
+
+                } catch (channelError: any) {
+                    this.syncLogger.getLogger().error({
+                        event: 'channel_fetch_error',
+                        channelId: channel.id,
+                        channelType: channel.type,
+                        error: channelError.message,
+                    });
+                    stats.errors++;
+                }
+            }
+
+            this.syncLogger.getLogger().info({
+                event: 'fetch_orders_completed',
+                clientId,
+                stats,
+            });
+
+            return {
+                success: stats.errors === 0,
+                stats,
+            };
+
+        } catch (error: any) {
+            this.syncLogger.getLogger().error({
+                event: 'fetch_orders_failed',
+                clientId,
+                error: error.message,
+            });
+
+            return {
+                success: false,
+                stats,
+                error: error.message,
+            };
+        }
+    }
+
+    /**
+     * Process a single order from channel - check DB, check FFN, create/link as needed
+     */
+    private async processChannelOrder(
+        channelOrder: any,
+        channel: any,
+        jtlService: JTLService,
+        jtlConfig: any,
+        stats: FetchOrdersStats
+    ): Promise<void> {
+        // Extract order identifier based on channel type
+        const externalOrderId = String(channelOrder.id);
+        const orderNumber = channel.type === 'SHOPIFY'
+            ? (channelOrder.name || String(channelOrder.order_number))
+            : channelOrder.number;
+
+        // Check if order already exists in DB
+        const existingOrder = await this.prisma.order.findFirst({
+            where: {
+                channelId: channel.id,
+                externalOrderId: externalOrderId,
+            },
+        });
+
+        if (existingOrder) {
+            stats.ordersAlreadyExisted++;
+            return;
+        }
+
+        // Order doesn't exist in DB - create it
+        const newOrder = await this.createOrderFromChannelData(
+            channelOrder,
+            channel
+        );
+        stats.newOrdersCreated++;
+
+        // Now check if this order exists in JTL FFN
+        // We use orderId (e.g., "SHOP-123456789") as merchantOutboundNumber
+        const ffnOutbound = await jtlService.getOutboundByMerchantNumber(newOrder.orderId);
+
+        if (ffnOutbound) {
+            // Order exists in FFN - link it
+            await this.prisma.order.update({
+                where: { id: newOrder.id },
+                data: {
+                    jtlOutboundId: ffnOutbound.outboundId,
+                    lastJtlSync: new Date(),
+                    syncStatus: 'SYNCED',
+                    fulfillmentState: this.mapFFNStatusToFulfillmentState(ffnOutbound.status),
+                },
+            });
+
+            this.syncLogger.getLogger().info({
+                event: 'order_linked_to_ffn',
+                orderId: newOrder.id,
+                orderNumber: newOrder.orderNumber,
+                outboundId: ffnOutbound.outboundId,
+            });
+
+            stats.ordersLinkedToFFN++;
+
+        } else {
+            // Order doesn't exist in FFN - push it
+            const syncResult = await this.syncOrderToFFN(newOrder.id);
+
+            if (syncResult.success) {
+                stats.ordersPushedToFFN++;
+            } else {
+                this.syncLogger.getLogger().warn({
+                    event: 'ffn_push_failed',
+                    orderId: newOrder.id,
+                    error: syncResult.error,
+                });
+                stats.errors++;
+            }
+        }
+    }
+
+    /**
+     * Create an order in DB from channel data (Shopify or WooCommerce format)
+     */
+    private async createOrderFromChannelData(
+        channelOrder: any,
+        channel: any
+    ): Promise<Order> {
+        const isShopify = channel.type === 'SHOPIFY';
+        const externalOrderId = String(channelOrder.id);
+        const orderNumber = isShopify
+            ? (channelOrder.name || String(channelOrder.order_number))
+            : channelOrder.number;
+
+        // Extract shipping address
+        const shippingAddress = isShopify
+            ? channelOrder.shipping_address || {}
+            : channelOrder.shipping || {};
+
+        // Extract line items
+        const lineItems = isShopify
+            ? channelOrder.line_items || []
+            : channelOrder.line_items || [];
+
+        // Determine order date
+        const orderDate = channelOrder.created_at
+            ? new Date(channelOrder.created_at)
+            : new Date();
+
+        // Create order with items
+        const newOrder = await this.prisma.order.create({
+            data: {
+                orderId: `${channel.type.substring(0, 4)}-${externalOrderId}`,
+                clientId: channel.clientId,
+                channelId: channel.id,
+                externalOrderId: externalOrderId,
+                orderNumber: orderNumber,
+                orderDate: orderDate,
+                status: 'PENDING',
+                fulfillmentState: 'PENDING',
+                syncStatus: 'PENDING',
+                // Shipping address
+                shippingFirstName: isShopify
+                    ? (shippingAddress.first_name || '')
+                    : (shippingAddress.first_name || ''),
+                shippingLastName: isShopify
+                    ? (shippingAddress.last_name || 'Unknown')
+                    : (shippingAddress.last_name || 'Unknown'),
+                shippingCompany: shippingAddress.company || null,
+                shippingAddress1: isShopify
+                    ? (shippingAddress.address1 || '')
+                    : (shippingAddress.address_1 || ''),
+                shippingAddress2: isShopify
+                    ? (shippingAddress.address2 || null)
+                    : (shippingAddress.address_2 || null),
+                shippingCity: shippingAddress.city || '',
+                shippingZip: isShopify
+                    ? (shippingAddress.zip || '')
+                    : (shippingAddress.postcode || ''),
+                shippingCountry: isShopify
+                    ? (shippingAddress.country || '')
+                    : (shippingAddress.country || ''),
+                shippingCountryCode: isShopify
+                    ? (shippingAddress.country_code || '')
+                    : (shippingAddress.country || ''),
+                // Customer info
+                customerEmail: isShopify
+                    ? channelOrder.email
+                    : channelOrder.billing?.email,
+                customerPhone: shippingAddress.phone || null,
+                customerName: `${shippingAddress.first_name || ''} ${shippingAddress.last_name || ''}`.trim() || 'Unknown',
+                // Shipping method
+                shippingMethod: isShopify
+                    ? (channelOrder.shipping_lines?.[0]?.title || 'Standard')
+                    : (channelOrder.shipping_lines?.[0]?.method_title || 'Standard'),
+                // Financial data
+                currency: channelOrder.currency || 'EUR',
+                total: channelOrder.total_price
+                    ? new Prisma.Decimal(channelOrder.total_price)
+                    : null,
+                // Payment status
+                paymentStatus: isShopify
+                    ? (channelOrder.financial_status === 'paid' ? 'paid' : 'pending')
+                    : (channelOrder.status === 'completed' || channelOrder.status === 'processing' ? 'paid' : 'pending'),
+                // Order items
+                items: {
+                    create: await Promise.all(lineItems.map(async (item: any) => {
+                        const sku = isShopify
+                            ? (item.sku || `NO-SKU-${item.variant_id || item.product_id}`)
+                            : (item.sku || `NO-SKU-${item.product_id}`);
+
+                        // Try to find matching product
+                        const product = await this.prisma.product.findFirst({
+                            where: {
+                                clientId: channel.clientId,
+                                sku: sku,
+                            },
+                        });
+
+                        return {
+                            productId: product?.id || null,
+                            sku: sku,
+                            quantity: item.quantity,
+                            productName: isShopify
+                                ? (item.name || item.title || 'Unknown Product')
+                                : (item.name || 'Unknown Product'),
+                            unitPrice: item.price
+                                ? new Prisma.Decimal(item.price)
+                                : null,
+                            totalPrice: isShopify
+                                ? (item.price ? new Prisma.Decimal(parseFloat(item.price) * item.quantity) : null)
+                                : (item.total ? new Prisma.Decimal(item.total) : null),
+                        };
+                    })),
+                },
+            },
+        });
+
+        this.syncLogger.getLogger().info({
+            event: 'order_created_from_channel',
+            orderId: newOrder.id,
+            orderNumber: newOrder.orderNumber,
+            channelType: channel.type,
+        });
+
+        return newOrder;
     }
 }
 
