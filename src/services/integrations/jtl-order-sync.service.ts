@@ -125,12 +125,36 @@ export class JTLOrderSyncService {
                 return { success: false, error: 'JTL not configured for this client' };
             }
 
-            // Check if already synced
+            // Check if already synced locally
             if (order.jtlOutboundId) {
                 return { success: true, outboundId: order.jtlOutboundId };
             }
 
-            // Transform and create outbound
+            // Check if order already exists in FFN (might have been pushed before with different orderId format)
+            const existingOutbound = await jtlService.getOutboundByMerchantNumber(order.orderId);
+            if (existingOutbound) {
+                // Link existing FFN outbound to local order
+                await this.prisma.order.update({
+                    where: { id: orderId },
+                    data: {
+                        jtlOutboundId: existingOutbound.outboundId,
+                        lastJtlSync: new Date(),
+                        syncStatus: 'SYNCED',
+                        fulfillmentState: this.mapFFNStatusToFulfillmentState(existingOutbound.status),
+                    },
+                });
+
+                this.syncLogger.getLogger().info({
+                    event: 'order_linked_to_existing_ffn',
+                    orderId,
+                    orderNumber: order.orderNumber,
+                    outboundId: existingOutbound.outboundId,
+                });
+
+                return { success: true, outboundId: existingOutbound.outboundId };
+            }
+
+            // Only create if not found in FFN
             const outbound = this.transformOrderToOutbound(order, jtlConfig);
             const result = await jtlService.createOutbound(outbound);
 
