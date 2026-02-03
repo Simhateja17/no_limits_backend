@@ -515,6 +515,7 @@ export class WebhookProcessorService {
             orderNumber: payload.name,
             externalOrderId: externalId,
             status,
+            orderOrigin: 'SHOPIFY',
             total: parseFloat(payload.total_price),
             currency: payload.currency,
             customerEmail: payload.email || payload.customer?.email || null,
@@ -966,6 +967,7 @@ export class WebhookProcessorService {
             externalOrderId: externalId,
             status,
             orderOrigin: 'WOOCOMMERCE',
+            paymentStatus: this.mapWooCommercePaymentStatus(payload.status),
             total: parseFloat(payload.total),
             currency: payload.currency,
             customerEmail: payload.billing?.email || null,
@@ -1243,6 +1245,24 @@ export class WebhookProcessorService {
         return OrderStatus.CANCELLED;
       default:
         return OrderStatus.PENDING;
+    }
+  }
+
+  private mapWooCommercePaymentStatus(status: string): string | null {
+    switch (status.toLowerCase()) {
+      case 'processing':
+      case 'completed':
+        return 'paid';
+      case 'refunded':
+        return 'refunded';
+      case 'pending':
+      case 'on-hold':
+        return 'pending';
+      case 'failed':
+        return 'failed';
+      case 'cancelled':
+      default:
+        return null;
     }
   }
 }
