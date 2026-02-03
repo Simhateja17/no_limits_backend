@@ -185,7 +185,9 @@ export class WooCommerceService {
   async getOrdersCreatedSince(since: Date): Promise<WooCommerceOrder[]> {
     const allOrders: WooCommerceOrder[] = [];
     let page = 1;
-    
+
+    console.log(`[WooCommerce] Starting order fetch since ${since.toISOString()} (100 per page)...`);
+
     while (true) {
       const orders = await this.getOrders({
         after: since.toISOString(),
@@ -196,13 +198,16 @@ export class WooCommerceService {
       if (orders.length === 0) break;
 
       allOrders.push(...orders);
-      
+
+      console.log(`[WooCommerce] Page ${page}: Fetched ${orders.length} orders (Total: ${allOrders.length})`);
+
       if (orders.length < 100) break;
-      
+
       page++;
       await this.delay(300);
     }
 
+    console.log(`[WooCommerce] Order fetch complete: ${allOrders.length} orders created since ${since.toISOString()}`);
     return allOrders;
   }
 
@@ -260,7 +265,9 @@ export class WooCommerceService {
   } = {}): Promise<WooCommerceProduct[]> {
     const allProducts: WooCommerceProduct[] = [];
     let page = 1;
-    
+
+    console.log(`[WooCommerce] Starting product fetch (100 per page)...`);
+
     while (true) {
       const products = await this.getProducts({
         ...params,
@@ -271,14 +278,17 @@ export class WooCommerceService {
       if (products.length === 0) break;
 
       allProducts.push(...products);
-      
+
+      console.log(`[WooCommerce] Page ${page}: Fetched ${products.length} products (Total: ${allProducts.length})`);
+
       if (products.length < 100) break;
-      
+
       page++;
-      
+
       await this.delay(300);
     }
 
+    console.log(`[WooCommerce] Product fetch complete: ${allProducts.length} total products in ${page} pages`);
     return allProducts;
   }
 

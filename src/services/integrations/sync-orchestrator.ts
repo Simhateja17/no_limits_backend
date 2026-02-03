@@ -291,9 +291,19 @@ export class SyncOrchestrator {
         }
       }
     } else if (this.config.channelType === 'WOOCOMMERCE' && this.wooCommerceService) {
-      const wooProducts = since
-        ? await this.wooCommerceService.getProductsUpdatedSince(since)
-        : await this.wooCommerceService.getAllProducts();
+      console.log('[pullProductsFromChannel] Calling WooCommerce API...');
+
+      let wooProducts: any[];
+      try {
+        wooProducts = since
+          ? await this.wooCommerceService.getProductsUpdatedSince(since)
+          : await this.wooCommerceService.getAllProducts();
+
+        console.log(`[pullProductsFromChannel] ✅ WooCommerce returned ${wooProducts.length} products`);
+      } catch (error) {
+        console.error('[pullProductsFromChannel] ❌ ERROR calling WooCommerce API:', error);
+        throw error;
+      }
 
       for (const product of wooProducts) {
         products.push({
@@ -610,14 +620,29 @@ export class SyncOrchestrator {
       }
       console.log(`[Shopify] Processing ${orders.length} orders (${ordersWithoutAddress} without shipping address)`);
     } else if (this.config.channelType === 'WOOCOMMERCE' && this.wooCommerceService) {
-      // For historic sync with a date, use created_at filter
-      const wooOrders = since
-        ? await this.wooCommerceService.getOrdersCreatedSince(since)
-        : await this.wooCommerceService.getAllOrders();
+      console.log('[pullOrdersFromChannel] Calling WooCommerce API...');
 
+      // For historic sync with a date, use created_at filter
+      let wooOrders: any[];
+      try {
+        wooOrders = since
+          ? await this.wooCommerceService.getOrdersCreatedSince(since)
+          : await this.wooCommerceService.getAllOrders();
+
+        console.log(`[pullOrdersFromChannel] ✅ WooCommerce returned ${wooOrders.length} orders`);
+      } catch (error) {
+        console.error('[pullOrdersFromChannel] ❌ ERROR calling WooCommerce API:', error);
+        throw error;
+      }
+
+      let ordersWithoutAddress = 0;
       for (const order of wooOrders) {
         orders.push(this.mapWooCommerceOrder(order));
+        if (!order.shipping) {
+          ordersWithoutAddress++;
+        }
       }
+      console.log(`[WooCommerce] Processing ${orders.length} orders (${ordersWithoutAddress} without shipping address)`);
     }
 
     return orders;
