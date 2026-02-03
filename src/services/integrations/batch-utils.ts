@@ -519,6 +519,8 @@ export class BatchOperations {
                 }
 
                 // Create order with nested items
+                // Look up channel to determine orderOrigin
+                const orderChannel = await tx.channel.findUnique({ where: { id: channelId } });
                 const created = await tx.order.create({
                   data: {
                     clientId,
@@ -532,6 +534,7 @@ export class BatchOperations {
                     currency: order.currency,
                     orderDate: order.orderDate,
                     status: order.status as any,
+                    orderOrigin: orderChannel?.type === 'WOOCOMMERCE' ? 'WOOCOMMERCE' : 'SHOPIFY',
                     items: {
                       create: orderItems,
                     },

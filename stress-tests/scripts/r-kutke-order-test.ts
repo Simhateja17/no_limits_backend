@@ -24,6 +24,10 @@
  */
 
 import crypto from 'crypto';
+import { PrismaClient } from '@prisma/client';
+import { Pool } from 'pg';
+import { PrismaPg } from '@prisma/adapter-pg';
+import 'dotenv/config';
 
 interface WooCommerceOrderInput {
   payment_method: string;
@@ -332,9 +336,89 @@ async function createOrders(config: OrderCreateConfig): Promise<OrderCreateResul
     console.log('   2. Verify orders appear in the admin dashboard');
     console.log('   3. Confirm JTL-FFN sync is working');
     console.log('   4. Monitor socket updates in the frontend\n');
+
+    // Verify order origins in database
+    console.log('\n⏳ Waiting 40 seconds for webhooks to process...');
+    await sleep(40000);
+    
+    await verifyOrderOrigins(result.orders.filter(o => o.orderId).map(o => o.orderId!));
   }
 
   return result;
+}
+
+/**
+ * Verify order origins in the database
+ */
+async function verifyOrderOrigins(wooOrderIds: number[]): Promise<void> {
+  console.log('\n================================================================================');
+  console.log('                    ORDER ORIGIN VERIFICATION');
+  console.log('================================================================================\n');
+
+  // Initialize Prisma with pg adapter (Prisma 7 requirement)
+  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+  const adapter = new PrismaPg(pool);
+  const prisma = new PrismaClient({ adapter });
+  
+  try {
+    // Look up orders by external order ID (WooCommerce order IDs)
+    const externalIds = wooOrderIds.map(id => String(id));
+    
+    const orders = await prisma.order.findMany({
+      where: {
+        externalOrderId: { in: externalIds }
+      },
+      select: {
+        id: true,
+        orderId: true,
+        orderNumber: true,
+        externalOrderId: true,
+        orderOrigin: true,
+        status: true,
+        syncStatus: true,
+        createdAt: true,
+      },
+      orderBy: { createdAt: 'desc' }
+    });
+
+    if (orders.length === 0) {
+      console.log('❌ No orders found in database yet. Webhooks may not have processed.\n');
+      console.log('   Created WooCommerce Order IDs:', wooOrderIds.join(', '));
+      return;
+    }
+
+    console.log(`Found ${orders.length}/${wooOrderIds.length} orders in database:\n`);
+    
+    let correctOrigin = 0;
+    let wrongOrigin = 0;
+
+    for (const order of orders) {
+      const isCorrect = order.orderOrigin === 'WOOCOMMERCE';
+      if (isCorrect) {
+        correctOrigin++;
+        console.log(`  ✅ ${order.orderId} (ext: ${order.externalOrderId}) → origin: ${order.orderOrigin}`);
+      } else {
+        wrongOrigin++;
+        console.log(`  ❌ ${order.orderId} (ext: ${order.externalOrderId}) → origin: ${order.orderOrigin} (WRONG! Should be WOOCOMMERCE)`);
+      }
+    }
+
+    console.log('\n--------------------------------------------------------------------------------');
+    console.log(`  Correct Origin (WOOCOMMERCE): ${correctOrigin} ✅`);
+    console.log(`  Wrong Origin:                 ${wrongOrigin} ${wrongOrigin > 0 ? '❌' : '✅'}`);
+    console.log('--------------------------------------------------------------------------------\n');
+
+    if (wrongOrigin > 0) {
+      console.log('⚠️  Some orders have incorrect origin. Backend may need redeployment.\n');
+    } else if (correctOrigin === wooOrderIds.length) {
+      console.log('🎉 All orders have correct WOOCOMMERCE origin!\n');
+    }
+  } catch (error) {
+    console.error('❌ Error verifying order origins:', error);
+  } finally {
+    await prisma.$disconnect();
+    await pool.end();
+  }
 }
 
 // CLI interface

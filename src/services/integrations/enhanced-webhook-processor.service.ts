@@ -1418,7 +1418,7 @@ export class EnhancedWebhookProcessor {
         tax: payload.total_tax ? parseFloat(payload.total_tax) : undefined,
         total: parseFloat(payload.total),
         currency: payload.currency,
-        paymentStatus: this.mapWooCommercePaymentStatus(payload.status),
+        paymentStatus: this.mapWooCommercePaymentStatus(payload.status) ?? undefined,
 
         // Shipping method (extracted from order - SOURCE OF TRUTH)
         shippingMethod: shippingLine?.method_title,      // Human-readable name

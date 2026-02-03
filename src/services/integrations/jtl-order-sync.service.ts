@@ -1137,6 +1137,7 @@ export class JTLOrderSyncService {
                 status: 'PENDING',
                 fulfillmentState: 'PENDING',
                 syncStatus: 'PENDING',
+                orderOrigin: isShopify ? 'SHOPIFY' : 'WOOCOMMERCE',
                 // Shipping address
                 shippingFirstName: isShopify
                     ? (shippingAddress.first_name || '')

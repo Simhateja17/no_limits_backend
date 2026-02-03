@@ -4,6 +4,15 @@
 # Usage: ./run-rkutke-test.sh [count] [--dry-run]
 #
 
+# Get script directory and backend root
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BACKEND_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+# Load backend .env for DATABASE_URL
+if [ -f "$BACKEND_DIR/.env" ]; then
+  export $(grep -v '^#' "$BACKEND_DIR/.env" | xargs)
+fi
+
 # WooCommerce API Credentials
 export RKUTKE_WOOCOMMERCE_KEY="ck_8ec81f84468307f3851b60bbe91c85db5f7d5073"
 export RKUTKE_WOOCOMMERCE_SECRET="cs_e34609c2a83ddf9d409b56fd324e7e48404161e9"

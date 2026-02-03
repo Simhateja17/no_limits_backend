@@ -734,6 +734,7 @@ export class SyncOrchestrator {
           externalOrderId: orderData.externalOrderId,
           orderNumber: orderData.orderNumber,
           status: 'PENDING',
+          orderOrigin: channel.type === 'WOOCOMMERCE' ? 'WOOCOMMERCE' : 'SHOPIFY',
           shippingFirstName: orderData.shippingAddress.firstname || '',
           shippingLastName: orderData.shippingAddress.lastname,
           shippingCompany: orderData.shippingAddress.company,
