@@ -1340,6 +1340,7 @@ export class EnhancedWebhookProcessor {
                 lastOperationalUpdateBy: 'WOOCOMMERCE',
                 lastOperationalUpdateAt: new Date(),
                 ffnSyncError: null, // Clear the "awaiting payment" message
+                paymentStatus: 'paid', // Explicitly set to paid when payment confirmed
               },
             });
 
@@ -1351,7 +1352,7 @@ export class EnhancedWebhookProcessor {
                 origin: 'WOOCOMMERCE',
                 targetPlatform: 'nolimits',
                 success: true,
-                changedFields: ['isOnHold', 'holdReason', 'holdReleasedAt', 'holdReleasedBy'],
+                changedFields: ['isOnHold', 'holdReason', 'holdReleasedAt', 'holdReleasedBy', 'paymentStatus'],
               },
             });
 
@@ -1417,6 +1418,7 @@ export class EnhancedWebhookProcessor {
         tax: payload.total_tax ? parseFloat(payload.total_tax) : undefined,
         total: parseFloat(payload.total),
         currency: payload.currency,
+        paymentStatus: this.mapWooCommercePaymentStatus(payload.status),
 
         // Shipping method (extracted from order - SOURCE OF TRUTH)
         shippingMethod: shippingLine?.method_title,      // Human-readable name
@@ -1507,6 +1509,32 @@ export class EnhancedWebhookProcessor {
         return OrderStatus.ERROR;
       default:
         return OrderStatus.PENDING;
+    }
+  }
+
+  /**
+   * Maps WooCommerce order status to payment status.
+   * WooCommerce doesn't have a dedicated payment status field like Shopify's financial_status,
+   * so we infer payment state from the order status.
+   *
+   * @param status WooCommerce order status (pending, processing, completed, refunded, etc.)
+   * @returns Payment status string ('paid', 'pending', 'refunded', 'failed') or null
+   */
+  private mapWooCommercePaymentStatus(status: string): string | null {
+    switch (status.toLowerCase()) {
+      case 'processing':
+      case 'completed':
+        return 'paid';
+      case 'refunded':
+        return 'refunded';
+      case 'pending':
+      case 'on-hold':
+        return 'pending';
+      case 'failed':
+        return 'failed';
+      case 'cancelled':
+      default:
+        return null;
     }
   }
 }

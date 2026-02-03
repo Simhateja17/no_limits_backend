@@ -965,6 +965,7 @@ export class WebhookProcessorService {
             orderNumber: payload.number,
             externalOrderId: externalId,
             status,
+            orderOrigin: 'WOOCOMMERCE',
             total: parseFloat(payload.total),
             currency: payload.currency,
             customerEmail: payload.billing?.email || null,
