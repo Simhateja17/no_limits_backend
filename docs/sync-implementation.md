@@ -7,7 +7,7 @@ This document summarizes the dual-master model implementation for orders and ret
 ## Core Principles
 
 ### Order Synchronization
-- **Single Creation Authority**: Orders ONLY originate from Shopify/WooCommerce
+- **Singlze Creation Authority**: Orders ONLY originate from Shopify/WooCommerce
 - **Commercial Fields**: Owned by commerce platform (price, customer identity, order totals)
 - **Operational Fields**: Owned by No-Limits platform (fulfillment status, carrier, tracking, notes)
 - **Sync Flow**: Shopify/WooCommerce → No-Limits → JTL-FFN → Warehouse
