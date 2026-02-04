@@ -1376,7 +1376,15 @@ export class EnhancedWebhookProcessor {
 
       // Extract shipping method from shipping_lines (first shipping line is the primary)
       const shippingLine = payload.shipping_lines?.[0];
-      
+
+      // DEBUG: Log WooCommerce order ID vs order number for troubleshooting
+      console.log(`[WooCommerce Webhook] Order ID mapping:`, {
+        internalId: payload.id,
+        orderNumber: payload.number,
+        externalIdUsed: externalId,
+        hasOrderNumber: !!payload.number,
+      });
+
       // Transform WooCommerce order to our format
       const orderData: IncomingOrderData = {
         externalOrderId: externalId,

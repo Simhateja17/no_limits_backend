@@ -33,6 +33,20 @@ import {
   ShopifyRefundLineItem,
 } from './types.js';
 
+// Payment hold detection - matching order-sync.service.ts logic
+const SHOPIFY_PAID_STATUSES = ['paid', 'authorized', 'partially_paid'];
+const WOOCOMMERCE_UNPAID_STATUSES = ['pending', 'on-hold'];
+
+function shouldHoldShopifyOrderForPayment(paymentStatus?: string): boolean {
+  if (!paymentStatus) return true;
+  return !SHOPIFY_PAID_STATUSES.includes(paymentStatus.toLowerCase());
+}
+
+function shouldHoldWooCommerceOrderForPayment(orderStatus?: string): boolean {
+  if (!orderStatus) return true;
+  return WOOCOMMERCE_UNPAID_STATUSES.includes(orderStatus.toLowerCase());
+}
+
 interface SyncConfig {
   channelId: string;
   channelType: ChannelType;
@@ -79,6 +93,10 @@ interface OrderSyncData {
   }[];
   shippingAddress: JTLAddress;
   customerEmail?: string;
+  // Payment and date tracking for initial sync
+  status?: string;           // WooCommerce order status (for payment hold)
+  paymentStatus?: string;    // Shopify financial_status (for payment hold)
+  orderDate?: Date;          // Original order creation date from platform
 }
 
 export class SyncOrchestrator {
@@ -676,6 +694,9 @@ export class SyncOrchestrator {
         phone: order.shipping_address?.phone || undefined,
       },
       customerEmail: order.email,
+      // Payment and date tracking for initial sync
+      paymentStatus: order.financial_status,
+      orderDate: order.created_at ? new Date(order.created_at) : undefined,
     };
   }
 
@@ -683,6 +704,13 @@ export class SyncOrchestrator {
    * Map WooCommerce order to internal format
    */
   private mapWooCommerceOrder(order: WooCommerceOrder): OrderSyncData {
+    // DEBUG: Log WooCommerce order ID vs order number for troubleshooting
+    console.log(`[SyncOrchestrator] WooCommerce order mapping:`, {
+      internalId: order.id,
+      orderNumber: order.number,
+      hasOrderNumber: !!order.number,
+    });
+
     return {
       localOrderId: '',
       externalOrderId: String(order.id),
@@ -707,6 +735,9 @@ export class SyncOrchestrator {
         phone: order.billing.phone || undefined,
       },
       customerEmail: order.billing.email,
+      // Payment and date tracking for initial sync
+      status: order.status,
+      orderDate: order.date_created ? new Date(order.date_created) : undefined,
     };
   }
 
@@ -750,6 +781,18 @@ export class SyncOrchestrator {
         status: updatedOrder.status,
       };
     } else {
+      // Determine if order requires payment hold
+      const isWooCommerce = channel.type === 'WOOCOMMERCE';
+      const requiresPaymentHold = isWooCommerce
+        ? shouldHoldWooCommerceOrderForPayment(orderData.status)
+        : shouldHoldShopifyOrderForPayment(orderData.paymentStatus);
+
+      console.log(`[SyncOrchestrator] Payment hold check for order ${orderData.externalOrderId}:`, {
+        channelType: channel.type,
+        status: isWooCommerce ? orderData.status : orderData.paymentStatus,
+        requiresPaymentHold,
+      });
+
       // Create new order
       const newOrder = await this.prisma.order.create({
         data: {
@@ -759,7 +802,13 @@ export class SyncOrchestrator {
           externalOrderId: orderData.externalOrderId,
           orderNumber: orderData.orderNumber,
           status: 'PENDING',
-          orderOrigin: channel.type === 'WOOCOMMERCE' ? 'WOOCOMMERCE' : 'SHOPIFY',
+          orderOrigin: isWooCommerce ? 'WOOCOMMERCE' : 'SHOPIFY',
+          // Payment hold and order date from initial sync
+          orderDate: orderData.orderDate,
+          isOnHold: requiresPaymentHold,
+          holdReason: requiresPaymentHold ? 'AWAITING_PAYMENT' : null,
+          holdPlacedAt: requiresPaymentHold ? new Date() : null,
+          holdPlacedBy: requiresPaymentHold ? 'SYSTEM' : null,
           shippingFirstName: orderData.shippingAddress.firstname || '',
           shippingLastName: orderData.shippingAddress.lastname,
           shippingCompany: orderData.shippingAddress.company,
@@ -1480,6 +1529,7 @@ export class SyncOrchestrator {
         jobData,
         {
           singletonKey: `ffn-sync-${orderId}`, // Prevent duplicate jobs for same order
+          priority: 1,
           retryLimit: 3,
           retryDelay: 60,
           retryBackoff: true,
