@@ -598,7 +598,7 @@ export class InitialSyncPipelineService {
     console.log(`[SyncPipeline] Step 1 Results:`);
     console.log(`[SyncPipeline]   📦 Products: ${result.products.itemsProcessed} processed, ${result.products.itemsFailed} failed`);
     console.log(`[SyncPipeline]   🛒 Orders: ${result.orders.itemsProcessed} processed, ${result.orders.itemsFailed} failed`);
-    console.log(`[SyncPipeline]   ↩️  Returns: ${result.returns.itemsProcessed} processed, ${result.returns.itemsFailed} failed`);
+    console.log(`[SyncPipeline]   ↩️  Returns: ${result.returns.itemsProcessed} processed, ${result.returns.itemsFailed} failed, ${result.returns.itemsSkipped || 0} skipped`);
     console.log(`[SyncPipeline]   📊 Total: ${totalProcessed} processed, ${totalFailed} failed`);
 
     return {

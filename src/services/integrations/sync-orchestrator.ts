@@ -920,6 +920,16 @@ export class SyncOrchestrator {
         try {
           const localReturn = await this.createReturnInDB(refund);
 
+          // Skip orphan refunds (order not found in local DB)
+          if (!localReturn) {
+            results.push({
+              externalId: refund.refundId,
+              success: true,
+              action: 'skipped',
+            });
+            continue;
+          }
+
           // Push to JTL FFN
           await this.pushReturnToJTL(localReturn);
 
@@ -1016,7 +1026,7 @@ export class SyncOrchestrator {
     localReturnId: string;
     orderId: string;
     items: { sku: string; quantity: number; jtlJfsku?: string }[];
-  }> {
+  } | null> {
     // Find the order
     const order = await this.prisma.order.findFirst({
       where: {
@@ -1027,7 +1037,8 @@ export class SyncOrchestrator {
     });
 
     if (!order) {
-      throw new Error(`Order ${refundData.orderId} not found for refund`);
+      console.warn(`[SyncOrchestrator] ⚠️ Skipping refund ${refundData.refundId}: Order ${refundData.orderId} not found in local DB (may be an old/deleted order)`);
+      return null;
     }
 
     // Create return record
@@ -2010,14 +2021,14 @@ export class SyncOrchestrator {
   async pullFromChannelOnly(since?: Date): Promise<{
     products: { itemsProcessed: number; itemsFailed: number };
     orders: { itemsProcessed: number; itemsFailed: number };
-    returns: { itemsProcessed: number; itemsFailed: number };
+    returns: { itemsProcessed: number; itemsFailed: number; itemsSkipped: number };
   }> {
     console.log(`[SyncOrchestrator] Pull from channel only (no JTL push) since ${since?.toISOString() || 'all'}`);
 
     const results = {
       products: { itemsProcessed: 0, itemsFailed: 0 },
       orders: { itemsProcessed: 0, itemsFailed: 0 },
-      returns: { itemsProcessed: 0, itemsFailed: 0 },
+      returns: { itemsProcessed: 0, itemsFailed: 0, itemsSkipped: 0 },
     };
 
     // Verify channel exists
@@ -2097,8 +2108,12 @@ export class SyncOrchestrator {
 
       for (const ret of channelReturns) {
         try {
-          await this.createReturnInDB(ret);
-          results.returns.itemsProcessed++;
+          const savedReturn = await this.createReturnInDB(ret);
+          if (savedReturn) {
+            results.returns.itemsProcessed++;
+          } else {
+            results.returns.itemsSkipped++;
+          }
         } catch (error) {
           console.error(`[SyncOrchestrator] Failed to save return:`, error);
           results.returns.itemsFailed++;
