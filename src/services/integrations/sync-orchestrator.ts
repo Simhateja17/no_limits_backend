@@ -47,6 +47,27 @@ function shouldHoldWooCommerceOrderForPayment(orderStatus?: string): boolean {
   return WOOCOMMERCE_UNPAID_STATUSES.includes(orderStatus.toLowerCase());
 }
 
+// Map WooCommerce order status to paymentStatus field (matching webhook-processor.service.ts)
+function mapWooCommercePaymentStatus(status?: string): string | null {
+  if (!status) return null;
+  switch (status.toLowerCase()) {
+    case 'processing':
+    case 'completed':
+    case 'delivered': // Custom WooCommerce status - delivered orders are paid
+      return 'paid';
+    case 'refunded':
+      return 'refunded';
+    case 'pending':
+    case 'on-hold':
+      return 'pending';
+    case 'failed':
+      return 'failed';
+    case 'cancelled':
+    default:
+      return null;
+  }
+}
+
 interface SyncConfig {
   channelId: string;
   channelType: ChannelType;
@@ -809,6 +830,10 @@ export class SyncOrchestrator {
           holdReason: requiresPaymentHold ? 'AWAITING_PAYMENT' : null,
           holdPlacedAt: requiresPaymentHold ? new Date() : null,
           holdPlacedBy: requiresPaymentHold ? 'SYSTEM' : null,
+          // Payment status for UI display (Paid/Unpaid badge)
+          paymentStatus: isWooCommerce
+            ? mapWooCommercePaymentStatus(orderData.status)
+            : orderData.paymentStatus,
           shippingFirstName: orderData.shippingAddress.firstname || '',
           shippingLastName: orderData.shippingAddress.lastname,
           shippingCompany: orderData.shippingAddress.company,
@@ -919,7 +944,7 @@ export class SyncOrchestrator {
     }
 
     const jtlOutbound: JTLOutbound = {
-      merchantOutboundNumber: `${this.config.channelId}-${orderData.externalOrderId}`,
+      merchantOutboundNumber: orderData.orderNumber,
       warehouseId: this.config.jtlWarehouseId,
       fulfillerId: this.config.jtlFulfillerId,
       externalNumber: orderData.orderNumber,

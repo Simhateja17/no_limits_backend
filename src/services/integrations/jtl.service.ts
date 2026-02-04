@@ -1807,7 +1807,8 @@ export class JTLService {
 
       // Check if order already exists in FFN (by querying FFN directly)
       console.log(`[JTL-FFN-SYNC] Checking if order ${orderId} exists in FFN...`);
-      const existingOutbound = await this.getOutboundByMerchantNumber(order.orderId);
+      const merchantOutboundNumber = order.orderNumber || order.orderId;
+      const existingOutbound = await this.getOutboundByMerchantNumber(merchantOutboundNumber);
       if (existingOutbound) {
         // Order exists in FFN but not in our DB - sync the ID back
         console.log(`[JTL-FFN-SYNC] Order already exists in FFN as outbound ${existingOutbound.outboundId} - syncing ID back`);

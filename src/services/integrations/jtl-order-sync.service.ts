@@ -131,7 +131,8 @@ export class JTLOrderSyncService {
             }
 
             // Check if order already exists in FFN (might have been pushed before with different orderId format)
-            const existingOutbound = await jtlService.getOutboundByMerchantNumber(order.orderId);
+            const merchantOutboundNumber = order.orderNumber || order.orderId;
+            const existingOutbound = await jtlService.getOutboundByMerchantNumber(merchantOutboundNumber);
             if (existingOutbound) {
                 // Link existing FFN outbound to local order
                 await this.prisma.order.update({
@@ -741,7 +742,7 @@ export class JTLOrderSyncService {
         const lastname = nameParts.slice(1).join(' ') || firstname;
 
         return {
-            merchantOutboundNumber: order.orderId,
+            merchantOutboundNumber: order.orderNumber || order.orderId,
             warehouseId: jtlConfig.warehouseId,
             fulfillerId: jtlConfig.fulfillerId,
             currency: order.currency || 'EUR',
@@ -1048,8 +1049,9 @@ export class JTLOrderSyncService {
         stats.newOrdersCreated++;
 
         // Now check if this order exists in JTL FFN
-        // We use orderId (e.g., "SHOP-123456789") as merchantOutboundNumber
-        const ffnOutbound = await jtlService.getOutboundByMerchantNumber(newOrder.orderId);
+        // We use orderNumber as merchantOutboundNumber (e.g., "15990")
+        const merchantOutboundNumber = newOrder.orderNumber || newOrder.orderId;
+        const ffnOutbound = await jtlService.getOutboundByMerchantNumber(merchantOutboundNumber);
 
         if (ffnOutbound) {
             // Order exists in FFN - link it

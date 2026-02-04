@@ -1252,6 +1252,7 @@ export class WebhookProcessorService {
     switch (status.toLowerCase()) {
       case 'processing':
       case 'completed':
+      case 'delivered': // Custom WooCommerce status - delivered orders are paid
         return 'paid';
       case 'refunded':
         return 'refunded';

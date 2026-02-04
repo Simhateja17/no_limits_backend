@@ -646,7 +646,7 @@ export class SyncQueueProcessor {
       }));
 
       const jtlOutbound = {
-        merchantOutboundNumber: order.externalOrderId || order.orderId,
+        merchantOutboundNumber: order.orderNumber || order.externalOrderId || order.orderId,
         warehouseId: jtlConfig.warehouseId,
         currency: order.currency || 'EUR',
         shippingAddress: {
