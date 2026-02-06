@@ -1973,6 +1973,7 @@ export class SyncOrchestrator {
     const statusMap: Record<string, string> = {
       'PENDING': 'pending',
       'PROCESSING': 'processing',
+      'FULFILLED': 'completed',
       'SHIPPED': 'completed',
       'DELIVERED': 'completed',
       'CANCELLED': 'cancelled',

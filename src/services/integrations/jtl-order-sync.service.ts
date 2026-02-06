@@ -51,6 +51,12 @@ export interface FetchOrdersStats {
     errors: number;
 }
 
+// Payment statuses considered safe for fulfillment
+const FFN_ALLOWED_PAYMENT_STATUSES = [
+    'paid', 'completed', 'processing', 'refunded',
+    'partially_refunded', 'authorized', 'partially_paid',
+];
+
 // ============= SERVICE =============
 
 export class JTLOrderSyncService {
@@ -108,6 +114,29 @@ export class JTLOrderSyncService {
             // Don't sync cancelled orders
             if (order.isCancelled) {
                 return { success: true };
+            }
+
+            // Don't sync unpaid orders — block orders on payment hold or with unpaid status
+            if (order.isOnHold && order.holdReason === 'AWAITING_PAYMENT') {
+                this.syncLogger.getLogger().warn({
+                    event: 'ffn_sync_blocked_payment_hold',
+                    orderId,
+                    orderNumber: order.orderNumber,
+                    paymentStatus: order.paymentStatus,
+                    holdReason: order.holdReason,
+                });
+                return { success: false, error: `Order ${order.orderNumber || orderId} is on payment hold (AWAITING_PAYMENT) — cannot sync to FFN` };
+            }
+
+            const paymentStatus = (order.paymentStatus || '').toLowerCase();
+            if (!paymentStatus || !FFN_ALLOWED_PAYMENT_STATUSES.includes(paymentStatus)) {
+                this.syncLogger.getLogger().warn({
+                    event: 'ffn_sync_blocked_unpaid',
+                    orderId,
+                    orderNumber: order.orderNumber,
+                    paymentStatus: order.paymentStatus,
+                });
+                return { success: false, error: `Order ${order.orderNumber || orderId} has payment status "${order.paymentStatus || 'unknown'}" — cannot sync to FFN until paid` };
             }
 
             // Get JTL config
@@ -1075,18 +1104,31 @@ export class JTLOrderSyncService {
             stats.ordersLinkedToFFN++;
 
         } else {
-            // Order doesn't exist in FFN - push it
-            const syncResult = await this.syncOrderToFFN(newOrder.id);
+            // Order doesn't exist in FFN - check payment before pushing
+            const paymentOk = newOrder.paymentStatus &&
+                FFN_ALLOWED_PAYMENT_STATUSES.includes(newOrder.paymentStatus.toLowerCase());
 
-            if (syncResult.success) {
-                stats.ordersPushedToFFN++;
-            } else {
-                this.syncLogger.getLogger().warn({
-                    event: 'ffn_push_failed',
+            if (!paymentOk) {
+                this.syncLogger.getLogger().info({
+                    event: 'reconciliation_skipped_unpaid',
                     orderId: newOrder.id,
-                    error: syncResult.error,
+                    orderNumber: newOrder.orderNumber,
+                    paymentStatus: newOrder.paymentStatus,
                 });
-                stats.errors++;
+                // Don't count as error — order will be synced when payment is confirmed
+            } else {
+                const syncResult = await this.syncOrderToFFN(newOrder.id);
+
+                if (syncResult.success) {
+                    stats.ordersPushedToFFN++;
+                } else {
+                    this.syncLogger.getLogger().warn({
+                        event: 'ffn_push_failed',
+                        orderId: newOrder.id,
+                        error: syncResult.error,
+                    });
+                    stats.errors++;
+                }
             }
         }
     }
@@ -1179,10 +1221,25 @@ export class JTLOrderSyncService {
                 total: channelOrder.total_price
                     ? new Prisma.Decimal(channelOrder.total_price)
                     : null,
-                // Payment status
+                // Payment status and hold
                 paymentStatus: isShopify
                     ? (channelOrder.financial_status === 'paid' ? 'paid' : 'pending')
                     : (channelOrder.status === 'completed' || channelOrder.status === 'processing' ? 'paid' : 'pending'),
+                isOnHold: isShopify
+                    ? (channelOrder.financial_status !== 'paid' && channelOrder.financial_status !== 'authorized' && channelOrder.financial_status !== 'partially_paid')
+                    : (channelOrder.status !== 'completed' && channelOrder.status !== 'processing'),
+                holdReason: (isShopify
+                    ? (channelOrder.financial_status !== 'paid' && channelOrder.financial_status !== 'authorized' && channelOrder.financial_status !== 'partially_paid')
+                    : (channelOrder.status !== 'completed' && channelOrder.status !== 'processing'))
+                    ? 'AWAITING_PAYMENT' : null,
+                holdPlacedAt: (isShopify
+                    ? (channelOrder.financial_status !== 'paid' && channelOrder.financial_status !== 'authorized' && channelOrder.financial_status !== 'partially_paid')
+                    : (channelOrder.status !== 'completed' && channelOrder.status !== 'processing'))
+                    ? new Date() : null,
+                holdPlacedBy: (isShopify
+                    ? (channelOrder.financial_status !== 'paid' && channelOrder.financial_status !== 'authorized' && channelOrder.financial_status !== 'partially_paid')
+                    : (channelOrder.status !== 'completed' && channelOrder.status !== 'processing'))
+                    ? 'SYSTEM' : null,
                 // Order items
                 items: {
                     create: await Promise.all(lineItems.map(async (item: any) => {

@@ -1799,6 +1799,23 @@ export class JTLService {
         return { success: true };
       }
 
+      // Don't sync unpaid orders — block orders on payment hold or with unpaid status
+      const FFN_ALLOWED_PAYMENT_STATUSES = [
+        'paid', 'completed', 'processing', 'refunded',
+        'partially_refunded', 'authorized', 'partially_paid',
+      ];
+
+      if (order.isOnHold && order.holdReason === 'AWAITING_PAYMENT') {
+        console.log(`[JTL] Blocking order ${orderId} — on payment hold (AWAITING_PAYMENT)`);
+        return { success: false, error: `Order ${orderId} is on payment hold — cannot sync to FFN` };
+      }
+
+      const paymentStatus = (order.paymentStatus || '').toLowerCase();
+      if (!paymentStatus || !FFN_ALLOWED_PAYMENT_STATUSES.includes(paymentStatus)) {
+        console.log(`[JTL] Blocking order ${orderId} — payment status "${order.paymentStatus || 'unknown'}" not in allowed list`);
+        return { success: false, error: `Order ${orderId} has payment status "${order.paymentStatus || 'unknown'}" — cannot sync to FFN until paid` };
+      }
+
       // Check if already synced locally
       if (order.jtlOutboundId) {
         console.log(`[JTL] Order ${orderId} already synced as outbound ${order.jtlOutboundId}`);

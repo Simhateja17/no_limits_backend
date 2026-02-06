@@ -506,6 +506,11 @@ export class WebhookProcessorService {
         const orderId = `SHOP-${payload.name.replace('#', '')}`;
         const status = this.mapShopifyOrderStatus(payload.fulfillment_status, payload.financial_status);
 
+        // Check if order requires payment hold (Shopify paid statuses: paid, authorized, partially_paid)
+        const shopifyPaidStatuses = ['paid', 'authorized', 'partially_paid'];
+        const shopifyPaymentStatus = (payload.financial_status || '').toLowerCase();
+        const requiresPaymentHold = !shopifyPaymentStatus || !shopifyPaidStatuses.includes(shopifyPaymentStatus);
+
         // Create new order
         const newOrder = await this.prisma.order.create({
           data: {
@@ -516,6 +521,11 @@ export class WebhookProcessorService {
             externalOrderId: externalId,
             status,
             orderOrigin: 'SHOPIFY',
+            paymentStatus: payload.financial_status || null,
+            isOnHold: requiresPaymentHold,
+            holdReason: requiresPaymentHold ? 'AWAITING_PAYMENT' : null,
+            holdPlacedAt: requiresPaymentHold ? new Date() : null,
+            holdPlacedBy: requiresPaymentHold ? 'SYSTEM' : null,
             total: parseFloat(payload.total_price),
             currency: payload.currency,
             customerEmail: payload.email || payload.customer?.email || null,
@@ -581,8 +591,12 @@ export class WebhookProcessorService {
           }
         }
 
-        // Queue sync to JTL FFN
-        await this.queueJTLOrderSync(newOrder.id, 'SHOPIFY');
+        // Queue sync to JTL FFN only if payment is confirmed
+        if (!requiresPaymentHold) {
+          await this.queueJTLOrderSync(newOrder.id, 'SHOPIFY');
+        } else {
+          console.log(`[WebhookProcessor] Shopify order ${orderId} placed on payment hold — skipping FFN sync queue`);
+        }
 
         return {
           success: true,
@@ -958,6 +972,10 @@ export class WebhookProcessorService {
         const orderId = `WOO-${payload.number}`;
         const status = this.mapWooCommerceOrderStatus(payload.status);
 
+        // Check if order requires payment hold (WooCommerce unpaid statuses: pending, on-hold)
+        const wooUnpaidStatuses = ['pending', 'on-hold'];
+        const requiresPaymentHold = !payload.status || wooUnpaidStatuses.includes(payload.status.toLowerCase());
+
         const newOrder = await this.prisma.order.create({
           data: {
             clientId,
@@ -968,6 +986,10 @@ export class WebhookProcessorService {
             status,
             orderOrigin: 'WOOCOMMERCE',
             paymentStatus: this.mapWooCommercePaymentStatus(payload.status),
+            isOnHold: requiresPaymentHold,
+            holdReason: requiresPaymentHold ? 'AWAITING_PAYMENT' : null,
+            holdPlacedAt: requiresPaymentHold ? new Date() : null,
+            holdPlacedBy: requiresPaymentHold ? 'SYSTEM' : null,
             total: parseFloat(payload.total),
             currency: payload.currency,
             customerEmail: payload.billing?.email || null,
@@ -1032,8 +1054,12 @@ export class WebhookProcessorService {
           }
         }
 
-        // Queue sync to JTL FFN
-        await this.queueJTLOrderSync(newOrder.id, 'WOOCOMMERCE');
+        // Queue sync to JTL FFN only if payment is confirmed
+        if (!requiresPaymentHold) {
+          await this.queueJTLOrderSync(newOrder.id, 'WOOCOMMERCE');
+        } else {
+          console.log(`[WebhookProcessor] Order ${orderId} placed on payment hold — skipping FFN sync queue`);
+        }
 
         return {
           success: true,
