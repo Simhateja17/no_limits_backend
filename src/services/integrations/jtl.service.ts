@@ -2220,6 +2220,9 @@ export class JTLService {
       shippingType: !useJtlShippingMethodId ? 'Standard' : undefined,
       priority: order.priorityLevel || 0,
       note: order.warehouseNotes || order.notes || undefined,
+      attributes: order.tags?.length
+        ? order.tags.map((tag: string) => ({ key: 'tag', value: tag }))
+        : undefined,
     };
   }
 }

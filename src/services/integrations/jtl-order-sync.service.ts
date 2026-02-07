@@ -800,6 +800,9 @@ export class JTLOrderSyncService {
             shippingType: 'Standard',
             priority: order.priorityLevel || 0,
             note: order.warehouseNotes || order.notes || undefined,
+            attributes: order.tags?.length
+              ? order.tags.map(tag => ({ key: 'tag', value: tag }))
+              : undefined,
         };
     }
 
