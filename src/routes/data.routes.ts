@@ -59,6 +59,7 @@ router.get('/products', async (req: Request, res: Response) => {
         jtlProductId: true,
         jtlSyncStatus: true,
         lastJtlSync: true,
+        isBundle: true,
         clientId: true,
         client: {
           select: {
@@ -551,6 +552,14 @@ router.get('/products/:id', async (req: Request, res: Response) => {
           },
         },
       },
+      bundleItems: {
+        include: {
+          childProduct: {
+            select: { id: true, name: true, sku: true, gtin: true, imageUrl: true, available: true },
+          },
+        },
+        orderBy: { createdAt: 'asc' as const },
+      },
     };
 
     // Try to find by database ID first, then by productId (external ID), then by SKU
@@ -768,6 +777,215 @@ router.post('/products', async (req: Request, res: Response) => {
     res.status(500).json({
       success: false,
       error: error instanceof Error ? error.message : 'Failed to create product',
+    });
+  }
+});
+
+/**
+ * PUT /api/data/products/:id/bundle
+ * Full replacement of bundle configuration
+ */
+router.put('/products/:id/bundle', async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).userId;
+    const { id } = req.params;
+    const { isBundle, bundlePrice, items } = req.body as {
+      isBundle: boolean;
+      bundlePrice?: number | null;
+      items: Array<{ childProductId: string; quantity: number }>;
+    };
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      include: { client: true },
+    });
+
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+
+    // Find the product
+    const product = await prisma.product.findUnique({ where: { id } });
+    if (!product) {
+      return res.status(404).json({ success: false, error: 'Product not found' });
+    }
+
+    // Authorization: CLIENT can only edit their own products
+    if (user.role === 'CLIENT' && product.clientId !== user.client?.id) {
+      return res.status(403).json({ success: false, error: 'Unauthorized' });
+    }
+
+    // Validate items when bundle is enabled
+    if (isBundle && items && items.length > 0) {
+      // No self-reference
+      if (items.some(i => i.childProductId === id)) {
+        return res.status(400).json({ success: false, error: 'A product cannot contain itself as a bundle component' });
+      }
+
+      // All children must exist, belong to same client, and not be bundles themselves
+      const childProducts = await prisma.product.findMany({
+        where: { id: { in: items.map(i => i.childProductId) } },
+        select: { id: true, clientId: true, isBundle: true },
+      });
+
+      if (childProducts.length !== items.length) {
+        return res.status(400).json({ success: false, error: 'One or more component products not found' });
+      }
+
+      for (const child of childProducts) {
+        if (child.clientId !== product.clientId) {
+          return res.status(400).json({ success: false, error: 'Component products must belong to the same client' });
+        }
+        if (child.isBundle) {
+          return res.status(400).json({ success: false, error: 'Nested bundles are not allowed — a component cannot itself be a bundle' });
+        }
+      }
+
+      // Validate quantities
+      if (items.some(i => !i.quantity || i.quantity < 1)) {
+        return res.status(400).json({ success: false, error: 'Each component must have a quantity of at least 1' });
+      }
+    }
+
+    // Transaction: update product + replace bundle items
+    const updated = await prisma.$transaction(async (tx) => {
+      // Update product flags
+      await tx.product.update({
+        where: { id },
+        data: {
+          isBundle,
+          bundlePrice: isBundle && bundlePrice != null ? bundlePrice : null,
+        },
+      });
+
+      // Delete existing bundle items
+      await tx.bundleItem.deleteMany({ where: { parentProductId: id } });
+
+      // Create new bundle items if bundle is enabled
+      if (isBundle && items && items.length > 0) {
+        await tx.bundleItem.createMany({
+          data: items.map(i => ({
+            parentProductId: id,
+            childProductId: i.childProductId,
+            quantity: i.quantity,
+          })),
+        });
+      }
+
+      // Return updated product with bundle items
+      return tx.product.findUnique({
+        where: { id },
+        include: {
+          bundleItems: {
+            include: {
+              childProduct: {
+                select: { id: true, name: true, sku: true, gtin: true, imageUrl: true, available: true },
+              },
+            },
+            orderBy: { createdAt: 'asc' },
+          },
+          client: { select: { companyName: true, name: true } },
+        },
+      });
+    });
+
+    // Queue JTL sync if product has jtlProductId
+    if (product.jtlProductId) {
+      try {
+        const jtlConfig = await prisma.jtlConfig.findUnique({
+          where: { clientId_fk: product.clientId },
+        });
+        if (jtlConfig && jtlConfig.isActive) {
+          const queue = getQueue();
+          await queue.enqueue(
+            QUEUE_NAMES.PRODUCT_SYNC_TO_JTL,
+            { productId: product.id, origin: 'nolimits' },
+            { priority: 1, retryLimit: 3, retryDelay: 60, retryBackoff: true }
+          );
+          console.log(`[DataRoutes] Queued JTL FFN bundle sync for product ${product.sku}`);
+        }
+      } catch (syncError) {
+        console.error('[DataRoutes] Failed to queue JTL bundle sync:', syncError);
+      }
+    }
+
+    res.json({ success: true, data: updated });
+  } catch (error) {
+    console.error('Error updating bundle:', error);
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Failed to update bundle',
+    });
+  }
+});
+
+/**
+ * GET /api/data/products/:id/bundle/search
+ * Search for products to add as bundle components
+ */
+router.get('/products/:id/bundle/search', async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).userId;
+    const { id } = req.params;
+    const q = (req.query.q as string || '').trim();
+
+    if (!q || q.length < 1) {
+      return res.json({ success: true, data: [] });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      include: { client: true },
+    });
+
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+
+    // Get the parent product to determine client scope
+    const parentProduct = await prisma.product.findUnique({
+      where: { id },
+      select: { clientId: true },
+    });
+
+    if (!parentProduct) {
+      return res.status(404).json({ success: false, error: 'Product not found' });
+    }
+
+    // Authorization
+    if (user.role === 'CLIENT' && parentProduct.clientId !== user.client?.id) {
+      return res.status(403).json({ success: false, error: 'Unauthorized' });
+    }
+
+    const results = await prisma.product.findMany({
+      where: {
+        clientId: parentProduct.clientId,
+        isActive: true,
+        isBundle: false,
+        id: { not: id },
+        OR: [
+          { name: { contains: q, mode: 'insensitive' } },
+          { sku: { contains: q, mode: 'insensitive' } },
+        ],
+      },
+      select: {
+        id: true,
+        name: true,
+        sku: true,
+        gtin: true,
+        imageUrl: true,
+        available: true,
+      },
+      take: 10,
+      orderBy: { name: 'asc' },
+    });
+
+    res.json({ success: true, data: results });
+  } catch (error) {
+    console.error('Error searching bundle components:', error);
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Failed to search products',
     });
   }
 });
@@ -1764,6 +1982,99 @@ router.post('/inbounds', async (req: Request, res: Response) => {
     res.status(500).json({
       success: false,
       error: error instanceof Error ? error.message : 'Failed to create inbound',
+    });
+  }
+});
+
+/**
+ * PATCH /api/data/inbounds/:id
+ * Update inbound delivery details
+ */
+router.patch('/inbounds/:id', async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).userId;
+    const { id } = req.params;
+    const {
+      deliveryType,
+      expectedDate,
+      carrierName,
+      trackingNumber,
+      notes,
+      externalInboundId,
+    } = req.body;
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      include: { client: true },
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: 'User not found',
+      });
+    }
+
+    const inbound = await prisma.inboundDelivery.findUnique({
+      where: { id },
+    });
+
+    if (!inbound) {
+      return res.status(404).json({
+        success: false,
+        error: 'Inbound delivery not found',
+      });
+    }
+
+    // Check authorization
+    if (user.role === 'CLIENT' && inbound.clientId !== user.client?.id) {
+      return res.status(403).json({
+        success: false,
+        error: 'Unauthorized',
+      });
+    }
+
+    // Build update data
+    const updateData: any = {};
+    if (deliveryType !== undefined) {
+      const validDeliveryTypes = ['FREIGHT_FORWARDER', 'PARCEL_SERVICE', 'SELF_DELIVERY', 'OTHER'];
+      updateData.deliveryType = validDeliveryTypes.includes(deliveryType?.toUpperCase())
+        ? deliveryType.toUpperCase()
+        : inbound.deliveryType;
+    }
+    if (expectedDate !== undefined) updateData.expectedDate = expectedDate ? new Date(expectedDate) : null;
+    if (carrierName !== undefined) updateData.carrierName = carrierName || null;
+    if (trackingNumber !== undefined) updateData.trackingNumber = trackingNumber || null;
+    if (notes !== undefined) updateData.notes = notes || null;
+    if (externalInboundId !== undefined) updateData.externalInboundId = externalInboundId || null;
+
+    const updatedInbound = await prisma.inboundDelivery.update({
+      where: { id },
+      data: updateData,
+      include: {
+        client: {
+          select: {
+            companyName: true,
+            name: true,
+          },
+        },
+        items: {
+          include: {
+            product: true,
+          },
+        },
+      },
+    });
+
+    res.json({
+      success: true,
+      data: updatedInbound,
+    });
+  } catch (error) {
+    console.error('[DataRoutes] Error updating inbound:', error);
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Failed to update inbound',
     });
   }
 });

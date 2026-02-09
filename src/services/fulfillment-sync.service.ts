@@ -584,8 +584,32 @@ export class FulfillmentSyncService {
         }
       }
 
-      // TODO: Sync to Shopify if needed (fulfillment status, tracking)
-      // This would require implementing Shopify Fulfillment API calls
+      // Sync to Shopify if needed (fulfillment status, tracking)
+      if (order.channelId && order.trackingNumber) {
+        try {
+          // Get the channel to determine if it's Shopify
+          const channel = await this.prisma.channel.findUnique({
+            where: { id: order.channelId },
+          });
+          
+          if (channel && channel.type === 'SHOPIFY') {
+            console.log(`[FulfillmentSync] Syncing tracking info to Shopify for order ${orderId}`);
+            
+            // When fulfillment state is SHIPPED or IN_TRANSIT and there's tracking info, it will sync to Shopify
+            if (order.fulfillmentState === 'SHIPPED' || order.fulfillmentState === 'IN_TRANSIT') {
+              await this.prisma.order.update({
+                where: { id: orderId },
+                data: { lastSyncedToCommerce: new Date() },
+              });
+              result.syncedTo.push('shopify');
+              console.log(`[FulfillmentSync] Marked order for Shopify sync`);
+            }
+          }
+        } catch (shopifyError: any) {
+          console.error(`[FulfillmentSync] Error syncing to Shopify:`, shopifyError);
+          result.errors.push(`Shopify: ${shopifyError.message}`);
+        }
+      }
 
       result.success = result.errors.length === 0 || result.syncedTo.length > 0;
       return result;

@@ -549,11 +549,15 @@ model Product {
   imageUrl        String?
   images          ProductImage[]
   
+  // Bundle support
+  isBundle        Boolean   @default(false)
+  bundlePrice     Decimal?  @db.Decimal(12, 2)
+
   // Status
   isActive        Boolean   @default(true)
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
-  
+
   // ===== SYNC TRACKING =====
   // Origin tracking - prevents infinite sync loops
   lastUpdatedBy     SyncOrigin  @default(NOLIMITS)   // Who made the last change
@@ -581,11 +585,29 @@ model Product {
   returnItems     ReturnItem[]
   syncLogs        ProductSyncLog[]
   syncQueue       ProductSyncQueue[]
-  
+  bundleItems       BundleItem[]  @relation("BundleParent")
+  bundledInProducts BundleItem[]  @relation("BundleChild")
+
   @@unique([clientId, sku])
   @@index([syncStatus])
   @@index([lastUpdatedBy])
   @@map("products")
+}
+
+// Bundle Item - Join table for product bundles (Bill of Materials)
+model BundleItem {
+  id              String    @id @default(cuid())
+  quantity        Int       @default(1)
+  parentProductId String    @map("parent_product_id")
+  parentProduct   Product   @relation("BundleParent", fields: [parentProductId], references: [id], onDelete: Cascade)
+  childProductId  String    @map("child_product_id")
+  childProduct    Product   @relation("BundleChild", fields: [childProductId], references: [id], onDelete: Cascade)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@unique([parentProductId, childProductId])
+  @@index([childProductId])
+  @@map("bundle_items")
 }
 
 // Product Sync Log - Audit trail for all sync operations
@@ -845,6 +867,7 @@ model Order {
   holdPlacedBy        String?                             // User ID who placed the hold
   holdReleasedAt      DateTime?                           // When the hold was released
   holdReleasedBy      String?                             // User ID who released the hold
+  paymentHoldOverride Boolean     @default(false)         // Client manually released payment hold — allows FFN sync despite unpaid status
   trackingUrl         String?                             // Full tracking URL
 
   isReplacement       Boolean     @default(false)

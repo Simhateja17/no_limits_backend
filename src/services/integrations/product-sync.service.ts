@@ -560,6 +560,13 @@ export class ProductSyncService {
         client: {
           include: { jtlConfig: true },
         },
+        bundleItems: {
+          include: {
+            childProduct: {
+              select: { name: true, sku: true, gtin: true },
+            },
+          },
+        },
       },
     });
 
@@ -1197,6 +1204,15 @@ export class ProductSyncService {
       hazmat: boolean;
       hazmatClass: string | null;
       jtlProductId: string | null;
+      isBundle?: boolean;
+      bundleItems?: Array<{
+        quantity: number;
+        childProduct: {
+          name: string;
+          sku: string;
+          gtin: string | null;
+        };
+      }>;
     },
     jtlConfig: {
       clientId: string;
@@ -1303,6 +1319,14 @@ export class ProductSyncService {
       countryOfOrigin: product.countryOfOrigin || undefined,
       imageUrl: product.imageUrl || undefined,
       attributes: attributes,
+      ...(product.isBundle && product.bundleItems && product.bundleItems.length > 0 ? {
+        bundles: product.bundleItems.map(bi => ({
+          name: bi.childProduct.name,
+          quantity: bi.quantity,
+          ean: bi.childProduct.gtin || bi.childProduct.sku,
+          upc: '',
+        })),
+      } : {}),
     };
 
     try {

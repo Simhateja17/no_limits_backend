@@ -94,6 +94,7 @@ export class ShopifyGraphQLService {
   private shopify: ReturnType<typeof shopifyApi>;
   private session: Session;
   private graphqlEndpoint: string;
+  private restBaseUrl: string;
 
   constructor(credentials: ShopifyCredentials) {
     this.credentials = credentials;
@@ -122,6 +123,7 @@ export class ShopifyGraphQLService {
     });
 
     this.graphqlEndpoint = `https://${shopDomain}/admin/api/${apiVersion}/graphql.json`;
+    this.restBaseUrl = `https://${shopDomain}/admin/api/${apiVersion}`;
   }
 
   /**
@@ -157,6 +159,28 @@ export class ShopifyGraphQLService {
     }
 
     return result.data as T;
+  }
+
+  /**
+   * Execute a Shopify Admin REST request.
+   * Used as a targeted fallback for resources that are expensive in GraphQL.
+   */
+  private async rest<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
+    const response = await fetch(`${this.restBaseUrl}${endpoint}`, {
+      ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Access-Token': this.credentials.accessToken,
+        ...options.headers,
+      },
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`Shopify REST fallback error: ${response.status} - ${error}`);
+    }
+
+    return response.json() as Promise<T>;
   }
 
   // ============= ORDERS =============
@@ -2160,13 +2184,11 @@ export class ShopifyGraphQLService {
       shipping_zone_id: number;
     }>;
   }>> {
-    // GraphQL uses DeliveryProfiles instead of ShippingZones
-    // This is a simplified implementation - full implementation would need more work
-    console.log('[Shopify GraphQL] getShippingZones: Using REST API for shipping zones (GraphQL uses different structure)');
-
-    // For now, return empty array as shipping zones have different structure in GraphQL
-    // The REST API is still better for this specific endpoint
-    return [];
+    console.log(`[Shopify GraphQL] getShippingZones: Fetching REST fallback from ${this.credentials.shopDomain}...`);
+    const response = await this.rest<{ shipping_zones: Array<any> }>('/shipping_zones.json');
+    const zones = response.shipping_zones || [];
+    console.log(`[Shopify GraphQL] getShippingZones: Received ${zones.length} zones via REST fallback`);
+    return zones;
   }
 
   async getShippingMethods(): Promise<Array<{
@@ -2176,9 +2198,63 @@ export class ShopifyGraphQLService {
     zoneId: number;
     zoneName: string;
   }>> {
-    // GraphQL uses DeliveryProfiles - this would need custom implementation
-    console.log('[Shopify GraphQL] getShippingMethods: Shipping methods not fully implemented in GraphQL service');
-    return [];
+    try {
+      const methods: Array<{
+        id: string;
+        name: string;
+        type: 'price_based' | 'weight_based' | 'carrier';
+        zoneId: number;
+        zoneName: string;
+      }> = [];
+
+      const zones = await this.getShippingZones();
+      for (const zone of zones) {
+        for (const rate of zone.price_based_shipping_rates || []) {
+          methods.push({
+            id: `price_${rate.id}`,
+            name: rate.name,
+            type: 'price_based',
+            zoneId: zone.id,
+            zoneName: zone.name,
+          });
+        }
+
+        for (const rate of zone.weight_based_shipping_rates || []) {
+          methods.push({
+            id: `weight_${rate.id}`,
+            name: rate.name,
+            type: 'weight_based',
+            zoneId: zone.id,
+            zoneName: zone.name,
+          });
+        }
+
+        for (const provider of zone.carrier_shipping_rate_providers || []) {
+          methods.push({
+            id: `carrier_${provider.id}`,
+            name: `Carrier Service ${provider.carrier_service_id}`,
+            type: 'carrier',
+            zoneId: zone.id,
+            zoneName: zone.name,
+          });
+        }
+      }
+
+      // Keep behavior aligned with existing REST service: dedupe by name
+      const uniqueMethods = new Map<string, typeof methods[0]>();
+      for (const method of methods) {
+        if (!uniqueMethods.has(method.name)) {
+          uniqueMethods.set(method.name, method);
+        }
+      }
+
+      const result = Array.from(uniqueMethods.values());
+      console.log(`[Shopify GraphQL] getShippingMethods: Returning ${result.length} unique methods via REST fallback`);
+      return result;
+    } catch (error) {
+      console.error('[Shopify GraphQL] Error fetching shipping methods:', error);
+      return [];
+    }
   }
 }
 

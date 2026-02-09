@@ -11,6 +11,8 @@ import { prisma } from '../config/database.js';
 import { JTLService } from '../services/integrations/jtl.service.js';
 import { SyncOrchestrator } from '../services/integrations/sync-orchestrator.js';
 import { getEncryptionService } from '../services/encryption.service.js';
+import { notificationService } from '../services/notification.service.js';
+import { getQueue, QUEUE_NAMES } from '../services/queue/sync-queue.service.js';
 
 // Types
 interface FulfillmentDashboardStats {
@@ -508,6 +510,7 @@ export const holdOrder = async (req: Request, res: Response): Promise<void> => {
         holdPlacedAt: new Date(),
         holdPlacedBy: user.id,
         priorityLevel: holdReasonToPriority(reason),
+        paymentHoldOverride: false,
         lastOperationalUpdateBy: 'NOLIMITS',
         lastOperationalUpdateAt: new Date(),
       },
@@ -568,13 +571,24 @@ export const releaseHold = async (req: Request, res: Response): Promise<void> =>
       return;
     }
 
-    // Prevent manual release of AWAITING_PAYMENT holds - these are system-managed
-    if (order.holdReason === 'AWAITING_PAYMENT') {
-      res.status(400).json({
-        success: false,
-        error: 'Cannot manually release payment hold. Order will be released automatically when payment is confirmed via webhook.',
+    // Track if this is a payment hold for special handling
+    const isPaymentHold = order.holdReason === 'AWAITING_PAYMENT';
+
+    if (isPaymentHold) {
+      console.log(`[FulfillmentController] Payment hold manually released for order ${orderId} by user ${user.id}`);
+
+      // Create enhanced audit log for payment hold overrides
+      await prisma.orderSyncLog.create({
+        data: {
+          orderId: order.id,
+          action: 'payment_hold_manually_released',
+          origin: 'NOLIMITS',
+          targetPlatform: 'nolimits',
+          success: true,
+          previousState: { holdReason: 'AWAITING_PAYMENT', releasedBy: user.id },
+          changedFields: ['isOnHold', 'holdReason', 'holdReleasedAt', 'holdReleasedBy'],
+        },
       });
-      return;
     }
 
     // Update in JTL FFN (restore normal priority)
@@ -598,6 +612,7 @@ export const releaseHold = async (req: Request, res: Response): Promise<void> =>
         holdReleasedAt: new Date(),
         holdReleasedBy: user.id,
         priorityLevel: 0,
+        ...(isPaymentHold && { paymentHoldOverride: true }),
         lastOperationalUpdateBy: 'NOLIMITS',
         lastOperationalUpdateAt: new Date(),
       },
@@ -615,9 +630,47 @@ export const releaseHold = async (req: Request, res: Response): Promise<void> =>
       },
     });
 
+    // If this was a payment hold and order not yet synced to FFN, queue it now
+    if (isPaymentHold && !order.jtlOutboundId) {
+      console.log(`[FulfillmentController] Queueing order ${orderId} for FFN sync after manual payment hold release`);
+
+      try {
+        const queue = getQueue();
+
+        await queue.enqueue(
+          QUEUE_NAMES.ORDER_SYNC_TO_FFN,
+          {
+            orderId: order.id,
+            origin: 'nolimits' as const,
+            operation: 'create' as const,
+          },
+          {
+            priority: 1,
+            retryLimit: 3,
+            retryDelay: 60,
+            retryBackoff: true,
+          }
+        );
+
+        await prisma.order.update({
+          where: { id: orderId },
+          data: {
+            syncStatus: 'PENDING',
+          },
+        });
+
+        console.log(`[FulfillmentController] Order ${orderId} queued for FFN sync`);
+      } catch (queueError) {
+        console.error(`[FulfillmentController] Failed to queue FFN sync for order ${orderId}:`, queueError);
+        // Don't fail the release if queue fails - order is still released from hold
+      }
+    }
+
     res.json({
       success: true,
-      message: 'Order released from hold',
+      message: isPaymentHold
+        ? 'Payment hold released. Order queued for fulfillment.'
+        : 'Order released from hold',
       data: updatedOrder,
     });
   } catch (error) {
@@ -694,9 +747,34 @@ export const updateTracking = async (req: Request, res: Response): Promise<void>
       },
     });
 
-    // TODO: If notifyCustomer is true, trigger notification via Shopify/email
+    // Notify customer if requested
     if (notifyCustomer) {
-      console.log(`[Fulfillment] Customer notification requested for order ${orderId}`);
+      console.log(`[Fulfillment] Creating customer notification for order ${orderId}`);
+      
+      try {
+        // Create in-app notification for customer tracking update
+        await notificationService.create({
+          type: 'INFO',
+          priority: 'MEDIUM',
+          title: 'Shipment Tracking Available',
+          message: `Your order ${order.orderNumber || order.orderId} has been shipped. Tracking number: ${trackingNumber}`,
+          clientId: order.clientId,
+          orderId: order.id,
+          metadata: {
+            trackingNumber,
+            carrier,
+            trackingUrl: trackingUrl || null,
+          },
+        });
+        
+        console.log(`[Fulfillment] Customer notification created for order ${orderId}`);
+        
+        // Note: For email notifications, the channel (Shopify/WooCommerce) should handle this
+        // when the fulfillment is synced via the sync orchestrator
+      } catch (notifError) {
+        console.error(`[Fulfillment] Failed to create customer notification:`, notifError);
+        // Don't fail the request if notification fails
+      }
     }
 
     res.json({
@@ -928,6 +1006,7 @@ export const bulkHoldOrders = async (req: Request, res: Response): Promise<void>
             holdPlacedAt: new Date(),
             holdPlacedBy: user.id,
             priorityLevel: holdReasonToPriority(reason),
+            paymentHoldOverride: false,
             lastOperationalUpdateBy: 'NOLIMITS',
             lastOperationalUpdateAt: new Date(),
           },

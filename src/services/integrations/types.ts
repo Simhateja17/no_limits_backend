@@ -367,6 +367,7 @@ export interface JTLProduct {
     amount: number;
     currency: string;
   };
+  bundles?: Array<{ name: string; quantity: number; ean: string; upc: string }>;
 }
 
 export interface JTLInbound {

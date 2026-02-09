@@ -1910,8 +1910,11 @@ router.get('/channels/:channelId', authenticate, async (req: Request, res: Respo
       });
     }
 
-    const channel = await prisma.channel.findUnique({
-      where: { id: channelId },
+    const channel = await prisma.channel.findFirst({
+      where: {
+        id: channelId,
+        clientId: req.user?.clientId, // Ensure channel belongs to requesting client
+      },
       select: {
         id: true,
         name: true,
@@ -1937,6 +1940,205 @@ router.get('/channels/:channelId', authenticate, async (req: Request, res: Respo
     });
   } catch (error) {
     console.error('Error fetching channel:', error);
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+});
+
+/**
+ * Helper function to mask credentials for display
+ */
+function maskCredential(value: string | null | undefined, type: 'clientId' | 'clientSecret' | 'url'): string {
+  if (!value) return '';
+
+  if (type === 'clientSecret') {
+    return '*'.repeat(20);
+  }
+
+  if (type === 'clientId') {
+    if (value.length <= 4) return value;
+    return value.substring(0, 4) + '*'.repeat(Math.min(value.length - 4, 16));
+  }
+
+  // url is unmasked
+  return value;
+}
+
+/**
+ * Get masked credentials for a channel (for display in UI)
+ */
+router.get('/channels/:channelId/credentials', authenticate, async (req: Request, res: Response) => {
+  try {
+    const { channelId } = req.params;
+    const clientId = req.user?.clientId;
+
+    if (!channelId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required parameter: channelId',
+      });
+    }
+
+    if (!clientId) {
+      return res.status(401).json({
+        success: false,
+        error: 'Unauthorized: No client ID found',
+      });
+    }
+
+    // Fetch channel with ownership verification
+    const channel = await prisma.channel.findFirst({
+      where: {
+        id: channelId,
+        clientId: clientId,
+      },
+      select: {
+        id: true,
+        name: true,
+        type: true,
+        shopDomain: true,
+        url: true,
+        apiClientId: true,
+        apiClientSecret: true,
+      },
+    });
+
+    if (!channel) {
+      return res.status(404).json({
+        success: false,
+        error: 'Channel not found or access denied',
+      });
+    }
+
+    // Decrypt credentials
+    const encryptionService = getEncryptionService();
+    const decryptedClientId = channel.apiClientId
+      ? encryptionService.safeDecrypt(channel.apiClientId)
+      : '';
+    const decryptedClientSecret = channel.apiClientSecret
+      ? encryptionService.safeDecrypt(channel.apiClientSecret)
+      : '';
+
+    // Apply masking
+    const maskedClientId = maskCredential(decryptedClientId, 'clientId');
+    const maskedClientSecret = maskCredential(decryptedClientSecret, 'clientSecret');
+
+    // Get store URL based on channel type
+    const storeUrl = channel.type === 'SHOPIFY'
+      ? (channel.shopDomain || '')
+      : (channel.url || '');
+
+    // Log credential access for audit trail
+    console.log(`[Credentials Access] Channel ${channelId} credentials accessed by client ${clientId}`);
+
+    res.json({
+      success: true,
+      data: {
+        channelName: channel.name,
+        channelType: channel.type,
+        storeUrl: storeUrl,
+        clientId: maskedClientId,
+        clientSecret: maskedClientSecret,
+      },
+    });
+  } catch (error) {
+    console.error('[GET /channels/:channelId/credentials] Error:', error);
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+});
+
+/**
+ * Update credentials for a channel
+ */
+router.put('/channels/:channelId/credentials', authenticate, async (req: Request, res: Response) => {
+  try {
+    const { channelId } = req.params;
+    const { storeUrl, clientId: newClientId, clientSecret: newClientSecret } = req.body;
+    const clientId = req.user?.clientId;
+
+    if (!channelId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required parameter: channelId',
+      });
+    }
+
+    if (!clientId) {
+      return res.status(401).json({
+        success: false,
+        error: 'Unauthorized: No client ID found',
+      });
+    }
+
+    // Verify channel ownership
+    const channel = await prisma.channel.findFirst({
+      where: {
+        id: channelId,
+        clientId: clientId,
+      },
+      select: {
+        id: true,
+        type: true,
+      },
+    });
+
+    if (!channel) {
+      return res.status(404).json({
+        success: false,
+        error: 'Channel not found or access denied',
+      });
+    }
+
+    // Build update object dynamically (only update provided fields)
+    const updateData: any = {};
+    const encryptionService = getEncryptionService();
+
+    // Update store URL based on channel type
+    if (storeUrl !== undefined) {
+      if (channel.type === 'SHOPIFY') {
+        updateData.shopDomain = storeUrl;
+      } else if (channel.type === 'WOOCOMMERCE') {
+        updateData.url = storeUrl;
+      }
+    }
+
+    // Update client ID if provided (encrypt before storing)
+    if (newClientId !== undefined && newClientId !== '') {
+      updateData.apiClientId = encryptionService.encrypt(newClientId);
+    }
+
+    // Update client secret if provided (encrypt before storing)
+    if (newClientSecret !== undefined && newClientSecret !== '') {
+      updateData.apiClientSecret = encryptionService.encrypt(newClientSecret);
+    }
+
+    // Only update if there are fields to update
+    if (Object.keys(updateData).length === 0) {
+      return res.json({
+        success: true,
+        message: 'No changes to update',
+      });
+    }
+
+    // Perform the update
+    await prisma.channel.update({
+      where: { id: channelId },
+      data: updateData,
+    });
+
+    console.log(`[Credentials Update] Channel ${channelId} credentials updated by client ${clientId}`);
+
+    res.json({
+      success: true,
+      message: 'Credentials updated successfully',
+    });
+  } catch (error) {
+    console.error('[PUT /channels/:channelId/credentials] Error:', error);
     res.status(500).json({
       success: false,
       error: error instanceof Error ? error.message : 'Unknown error',

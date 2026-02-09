@@ -655,8 +655,12 @@ export const GET_WEBHOOKS_QUERY = `
 // ============= SHIPPING QUERIES =============
 
 export const GET_DELIVERY_PROFILES_QUERY = `
-  query GetDeliveryProfiles($first: Int!) {
-    deliveryProfiles(first: $first) {
+  query GetDeliveryProfiles($first: Int!, $after: String) {
+    deliveryProfiles(first: $first, after: $after) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
       edges {
         node {
           id
@@ -665,7 +669,7 @@ export const GET_DELIVERY_PROFILES_QUERY = `
             locationGroup {
               id
             }
-            locationGroupZones(first: 20) {
+            locationGroupZones(first: 100) {
               edges {
                 node {
                   zone {
@@ -678,16 +682,41 @@ export const GET_DELIVERY_PROFILES_QUERY = `
                       name
                     }
                   }
-                  methodDefinitions(first: 20) {
+                  methodDefinitions(first: 100) {
                     edges {
                       node {
                         id
                         name
+                        active
+                        description
                         rateProvider {
+                          __typename
                           ... on DeliveryRateDefinition {
                             price {
                               amount
                               currencyCode
+                            }
+                          }
+                          ... on DeliveryParticipant {
+                            fixedFee {
+                              amount
+                              currencyCode
+                            }
+                            percentageOfRateFee
+                          }
+                        }
+                        methodConditions {
+                          field
+                          operator
+                          conditionCriteria {
+                            __typename
+                            ... on MoneyV2 {
+                              amount
+                              currencyCode
+                            }
+                            ... on Weight {
+                              value
+                              unit
                             }
                           }
                         }

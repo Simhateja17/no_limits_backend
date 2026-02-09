@@ -130,13 +130,22 @@ export class JTLOrderSyncService {
 
             const paymentStatus = (order.paymentStatus || '').toLowerCase();
             if (!paymentStatus || !FFN_ALLOWED_PAYMENT_STATUSES.includes(paymentStatus)) {
-                this.syncLogger.getLogger().warn({
-                    event: 'ffn_sync_blocked_unpaid',
-                    orderId,
-                    orderNumber: order.orderNumber,
-                    paymentStatus: order.paymentStatus,
-                });
-                return { success: false, error: `Order ${order.orderNumber || orderId} has payment status "${order.paymentStatus || 'unknown'}" — cannot sync to FFN until paid` };
+                if (order.paymentHoldOverride) {
+                    this.syncLogger.getLogger().info({
+                        event: 'ffn_sync_payment_override',
+                        orderId,
+                        orderNumber: order.orderNumber,
+                        paymentStatus: order.paymentStatus,
+                    });
+                } else {
+                    this.syncLogger.getLogger().warn({
+                        event: 'ffn_sync_blocked_unpaid',
+                        orderId,
+                        orderNumber: order.orderNumber,
+                        paymentStatus: order.paymentStatus,
+                    });
+                    return { success: false, error: `Order ${order.orderNumber || orderId} has payment status "${order.paymentStatus || 'unknown'}" — cannot sync to FFN until paid` };
+                }
             }
 
             // Get JTL config

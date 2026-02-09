@@ -1812,8 +1812,12 @@ export class JTLService {
 
       const paymentStatus = (order.paymentStatus || '').toLowerCase();
       if (!paymentStatus || !FFN_ALLOWED_PAYMENT_STATUSES.includes(paymentStatus)) {
-        console.log(`[JTL] Blocking order ${orderId} — payment status "${order.paymentStatus || 'unknown'}" not in allowed list`);
-        return { success: false, error: `Order ${orderId} has payment status "${order.paymentStatus || 'unknown'}" — cannot sync to FFN until paid` };
+        if (order.paymentHoldOverride) {
+          console.log(`[JTL] Payment guard bypassed for order ${orderId} — manual override (paymentStatus: "${order.paymentStatus}")`);
+        } else {
+          console.log(`[JTL] Blocking order ${orderId} — payment status "${order.paymentStatus || 'unknown'}" not in allowed list`);
+          return { success: false, error: `Order ${orderId} has payment status "${order.paymentStatus || 'unknown'}" — cannot sync to FFN until paid` };
+        }
       }
 
       // Check if already synced locally
