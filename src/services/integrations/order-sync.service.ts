@@ -350,6 +350,17 @@ export class OrderSyncService {
             notes: data.notes,
             tags: data.tags,
 
+            // If payment is refunded, cancel the order fully
+            ...(data.paymentStatus === 'refunded' ? {
+              status: 'CANCELLED' as OrderStatus,
+              fulfillmentState: 'CANCELED' as FulfillmentState,
+              isCancelled: true,
+              isOnHold: false,
+              holdReason: null,
+              holdReleasedAt: new Date(),
+              holdReleasedBy: 'SYSTEM',
+            } : {}),
+
             // Update tracking
             lastOperationalUpdateAt: new Date(),
           },

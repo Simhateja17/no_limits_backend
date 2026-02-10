@@ -2159,6 +2159,17 @@ router.patch('/orders/:id', async (req: Request, res: Response) => {
       });
     }
 
+    // CLIENT users: cannot edit once warehouse picking starts
+    if (user.role === 'CLIENT') {
+      const clientEditableFulfillmentStates = ['PENDING', 'PREPARATION', 'ACKNOWLEDGED', 'LOCKED'];
+      if (order.fulfillmentState && !clientEditableFulfillmentStates.includes(order.fulfillmentState)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Cannot edit order — it is currently being processed in the warehouse',
+        });
+      }
+    }
+
     // Track which fields changed for sync
     const changedFields: string[] = [];
     const updateData: any = {

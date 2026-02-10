@@ -875,26 +875,50 @@ router.post('/shopify/oauth/complete', async (req: Request, res: Response) => {
       code,
     });
 
-    console.log(`[Shopify OAuth] ✅ Access token received, creating channel...`);
+    console.log(`[Shopify OAuth] ✅ Access token received, checking for existing channel...`);
 
     // Encrypt the access token
     const encryptedAccessToken = encryptionService.encrypt(tokenData.accessToken);
 
-    // Create the channel
-    const channel = await prisma.channel.create({
-      data: {
+    // Check if channel already exists
+    const existingChannel = await prisma.channel.findFirst({
+      where: {
         clientId,
-        name: `Shopify - ${shopDomain}`,
-        type: 'SHOPIFY',
         shopDomain: shopDomain.trim(),
-        accessToken: encryptedAccessToken,
-        status: 'ACTIVE',
-        isActive: true,
-        lastSyncAt: null,
+        type: 'SHOPIFY',
       },
     });
 
-    console.log(`[Shopify OAuth] 📦 Channel created with ID: ${channel.id}`);
+    let channel;
+    if (existingChannel) {
+      // Update existing channel with new tokens
+      channel = await prisma.channel.update({
+        where: { id: existingChannel.id },
+        data: {
+          accessToken: encryptedAccessToken,
+          status: 'ACTIVE',
+          isActive: true,
+          syncEnabled: true,
+          updatedAt: new Date(),
+        },
+      });
+      console.log(`[Shopify OAuth] ✅ Channel already exists, updated: ${channel.id}`);
+    } else {
+      // Create new channel
+      channel = await prisma.channel.create({
+        data: {
+          clientId,
+          name: `Shopify - ${shopDomain}`,
+          type: 'SHOPIFY',
+          shopDomain: shopDomain.trim(),
+          accessToken: encryptedAccessToken,
+          status: 'ACTIVE',
+          isActive: true,
+          lastSyncAt: null,
+        },
+      });
+      console.log(`[Shopify OAuth] 📦 New channel created with ID: ${channel.id}`);
+    }
 
     // Clean up temporary OAuth config
     await prisma.shopifyOAuthConfig.delete({
@@ -1460,22 +1484,47 @@ router.post('/onboarding/channel/shopify', async (req: Request, res: Response) =
       // Encrypt the access token
       const encryptedAccessToken = encryptionService.encrypt(tokenData.accessToken);
 
-      // Create the channel
-      const channel = await prisma.channel.create({
-        data: {
+      // Check if channel already exists
+      const existingChannel = await prisma.channel.findFirst({
+        where: {
           clientId,
-          name: channelName || `Shopify - ${shopDomain}`,
-          type: 'SHOPIFY',
           shopDomain: shopDomain.trim(),
-          accessToken: encryptedAccessToken,
-          status: 'ACTIVE',
-          isActive: true,
-          syncEnabled: true,
-          lastSyncAt: null,
+          type: 'SHOPIFY',
         },
       });
 
-      console.log(`[Shopify Setup] Channel created with ID: ${channel.id}`);
+      let channel;
+      if (existingChannel) {
+        // Update existing channel with new tokens
+        channel = await prisma.channel.update({
+          where: { id: existingChannel.id },
+          data: {
+            name: channelName || existingChannel.name,
+            accessToken: encryptedAccessToken,
+            status: 'ACTIVE',
+            isActive: true,
+            syncEnabled: true,
+            updatedAt: new Date(),
+          },
+        });
+        console.log(`[Shopify Setup] ✅ Channel already exists, updated: ${channel.id}`);
+      } else {
+        // Create new channel
+        channel = await prisma.channel.create({
+          data: {
+            clientId,
+            name: channelName || `Shopify - ${shopDomain}`,
+            type: 'SHOPIFY',
+            shopDomain: shopDomain.trim(),
+            accessToken: encryptedAccessToken,
+            status: 'ACTIVE',
+            isActive: true,
+            syncEnabled: true,
+            lastSyncAt: null,
+          },
+        });
+        console.log(`[Shopify Setup] 📦 New channel created with ID: ${channel.id}`);
+      }
 
       // Clean up temporary OAuth config
       await prisma.shopifyOAuthConfig.delete({

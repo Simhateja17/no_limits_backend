@@ -400,6 +400,7 @@ model Channel {
   shippingMethodMappings ShippingMethodMapping[] @relation("ChannelShippingMappings")
   syncPipelines   SyncPipeline[]
 
+  @@unique([clientId, shopDomain, type])
   @@map("channels")
 }
 

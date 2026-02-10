@@ -380,20 +380,48 @@ export class ClientOnboardingService {
       const encryptionService = getEncryptionService();
       const encryptedAccessToken = encryptionService.encrypt(input.accessToken);
 
-      // Create channel
-      const channel = await this.prisma.channel.create({
-        data: {
+      // Check if channel already exists
+      const existingChannel = await this.prisma.channel.findFirst({
+        where: {
           clientId: input.clientId,
-          name: input.channelName || `Shopify - ${input.shopDomain}`,
-          type: ChannelType.SHOPIFY,
-          status: ChannelStatus.ACTIVE,
           shopDomain: input.shopDomain,
-          accessToken: encryptedAccessToken,
-          url: `https://${input.shopDomain}`,
-          isActive: true,
-          syncEnabled: true,
+          type: ChannelType.SHOPIFY,
         },
       });
+
+      let channel;
+      if (existingChannel) {
+        // Update existing channel with new credentials
+        channel = await this.prisma.channel.update({
+          where: { id: existingChannel.id },
+          data: {
+            name: input.channelName || existingChannel.name,
+            accessToken: encryptedAccessToken,
+            status: ChannelStatus.ACTIVE,
+            isActive: true,
+            syncEnabled: true,
+            url: `https://${input.shopDomain}`,
+            updatedAt: new Date(),
+          },
+        });
+        console.log(`[Onboarding] ✅ Channel already exists, updated: ${channel.id}`);
+      } else {
+        // Create new channel
+        channel = await this.prisma.channel.create({
+          data: {
+            clientId: input.clientId,
+            name: input.channelName || `Shopify - ${input.shopDomain}`,
+            type: ChannelType.SHOPIFY,
+            status: ChannelStatus.ACTIVE,
+            shopDomain: input.shopDomain,
+            accessToken: encryptedAccessToken,
+            url: `https://${input.shopDomain}`,
+            isActive: true,
+            syncEnabled: true,
+          },
+        });
+        console.log(`[Onboarding] 📦 New channel created: ${channel.id}`);
+      }
 
       // Register webhooks for real-time updates
       try {
@@ -460,21 +488,49 @@ export class ClientOnboardingService {
       const encryptionService = getEncryptionService();
       const encryptedConsumerSecret = encryptionService.encrypt(input.consumerSecret);
 
-      // Create channel
-      const channel = await this.prisma.channel.create({
-        data: {
+      // Check if channel already exists (check by URL since WooCommerce doesn't have shopDomain)
+      const existingChannel = await this.prisma.channel.findFirst({
+        where: {
           clientId: input.clientId,
-          name: input.channelName || `WooCommerce - ${new URL(input.storeUrl).hostname}`,
-          type: ChannelType.WOOCOMMERCE,
-          status: ChannelStatus.ACTIVE,
           apiUrl: input.storeUrl,
-          apiClientId: input.consumerKey, // WooCommerce uses consumer key/secret
-          apiClientSecret: encryptedConsumerSecret,
-          url: input.storeUrl,
-          isActive: true,
-          syncEnabled: true,
+          type: ChannelType.WOOCOMMERCE,
         },
       });
+
+      let channel;
+      if (existingChannel) {
+        // Update existing channel with new credentials
+        channel = await this.prisma.channel.update({
+          where: { id: existingChannel.id },
+          data: {
+            name: input.channelName || existingChannel.name,
+            apiClientId: input.consumerKey,
+            apiClientSecret: encryptedConsumerSecret,
+            status: ChannelStatus.ACTIVE,
+            isActive: true,
+            syncEnabled: true,
+            updatedAt: new Date(),
+          },
+        });
+        console.log(`[Onboarding] ✅ WooCommerce channel already exists, updated: ${channel.id}`);
+      } else {
+        // Create new channel
+        channel = await this.prisma.channel.create({
+          data: {
+            clientId: input.clientId,
+            name: input.channelName || `WooCommerce - ${new URL(input.storeUrl).hostname}`,
+            type: ChannelType.WOOCOMMERCE,
+            status: ChannelStatus.ACTIVE,
+            apiUrl: input.storeUrl,
+            apiClientId: input.consumerKey, // WooCommerce uses consumer key/secret
+            apiClientSecret: encryptedConsumerSecret,
+            url: input.storeUrl,
+            isActive: true,
+            syncEnabled: true,
+          },
+        });
+        console.log(`[Onboarding] 📦 New WooCommerce channel created: ${channel.id}`);
+      }
 
       // Register webhooks for real-time updates
       try {

@@ -814,6 +814,11 @@ export class SyncOrchestrator {
         requiresPaymentHold,
       });
 
+      // Determine payment status for this order
+      const resolvedPaymentStatus = isWooCommerce
+        ? mapWooCommercePaymentStatus(orderData.status)
+        : orderData.paymentStatus;
+
       // Create new order
       const newOrder = await this.prisma.order.create({
         data: {
@@ -822,18 +827,18 @@ export class SyncOrchestrator {
           channelId: this.config.channelId,
           externalOrderId: orderData.externalOrderId,
           orderNumber: orderData.orderNumber,
-          status: 'PENDING',
+          status: resolvedPaymentStatus === 'refunded' ? 'CANCELLED' : 'PENDING',
+          fulfillmentState: resolvedPaymentStatus === 'refunded' ? 'CANCELED' : 'PENDING',
+          isCancelled: resolvedPaymentStatus === 'refunded',
           orderOrigin: isWooCommerce ? 'WOOCOMMERCE' : 'SHOPIFY',
           // Payment hold and order date from initial sync
           orderDate: orderData.orderDate,
-          isOnHold: requiresPaymentHold,
-          holdReason: requiresPaymentHold ? 'AWAITING_PAYMENT' : null,
-          holdPlacedAt: requiresPaymentHold ? new Date() : null,
-          holdPlacedBy: requiresPaymentHold ? 'SYSTEM' : null,
+          isOnHold: resolvedPaymentStatus === 'refunded' ? false : requiresPaymentHold,
+          holdReason: resolvedPaymentStatus === 'refunded' ? null : (requiresPaymentHold ? 'AWAITING_PAYMENT' : null),
+          holdPlacedAt: resolvedPaymentStatus === 'refunded' ? null : (requiresPaymentHold ? new Date() : null),
+          holdPlacedBy: resolvedPaymentStatus === 'refunded' ? null : (requiresPaymentHold ? 'SYSTEM' : null),
           // Payment status for UI display (Paid/Unpaid badge)
-          paymentStatus: isWooCommerce
-            ? mapWooCommercePaymentStatus(orderData.status)
-            : orderData.paymentStatus,
+          paymentStatus: resolvedPaymentStatus,
           shippingFirstName: orderData.shippingAddress.firstname || '',
           shippingLastName: orderData.shippingAddress.lastname,
           shippingCompany: orderData.shippingAddress.company,
