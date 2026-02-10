@@ -307,6 +307,22 @@ export interface JTLBillOfMaterialsItem {
   quantity: number;
 }
 
+export interface JTLProductBOMComponent {
+  jfsku?: string;        // Child product's JTL ID (preferred, 11 chars)
+  merchantSku?: string;  // Fallback identifier
+  quantity: number;      // Required
+}
+
+export interface JTLProductSpecifications {
+  isBillOfMaterials?: boolean;
+  billOfMaterialsComponents?: JTLProductBOMComponent[];
+  isBatch?: boolean;
+  isBestBefore?: boolean;
+  isDivisible?: boolean;
+  isPackaging?: boolean;
+  isSerialNumber?: boolean;
+}
+
 export interface JTLAddress {
   salutation?: 'Mr' | 'Mrs' | 'Company' | 'Undefined';
   firstname?: string;
@@ -367,7 +383,7 @@ export interface JTLProduct {
     amount: number;
     currency: string;
   };
-  bundles?: Array<{ name: string; quantity: number; ean: string; upc: string }>;
+  specifications?: JTLProductSpecifications;
 }
 
 export interface JTLInbound {

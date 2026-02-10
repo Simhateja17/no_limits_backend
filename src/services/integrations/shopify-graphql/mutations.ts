@@ -417,7 +417,6 @@ export const FULFILLMENT_TRACKING_INFO_UPDATE_MUTATION = `
       userErrors {
         field
         message
-        code
       }
     }
   }

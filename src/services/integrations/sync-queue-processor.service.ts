@@ -1141,12 +1141,47 @@ export class JTLPollingService {
                   // Check for shipping information in the update
                   if (newFulfillmentState === 'SHIPPED') {
                     updateData.shippedAt = new Date();
+
+                    // Fetch tracking info from JTL
+                    try {
+                      const notifications = await jtlService.getShippingNotifications(outboundId);
+                      if (notifications.success && notifications.data) {
+                        const trackingInfo = jtlService.extractTrackingInfo(notifications.data);
+                        if (trackingInfo.trackingNumber) {
+                          updateData.trackingNumber = trackingInfo.trackingNumber;
+                          updateData.carrierSelection = trackingInfo.carrier || null;
+                          console.log(`[JTLPollingService] Fetched tracking for order ${order.id}: ${trackingInfo.trackingNumber}`);
+                        }
+                      }
+                    } catch (trackingError) {
+                      console.warn(`[JTLPollingService] Could not fetch tracking for outbound ${outboundId}:`, trackingError);
+                    }
                   }
 
                   await this.prisma.order.update({
                     where: { id: order.id },
                     data: updateData,
                   });
+
+                  // Queue commerce platform sync when order is shipped
+                  if (newFulfillmentState === 'SHIPPED') {
+                    try {
+                      const { getQueue, QUEUE_NAMES } = await import('../queue/sync-queue.service.js');
+                      const queue = getQueue();
+                      await queue.enqueue(
+                        QUEUE_NAMES.ORDER_SYNC_TO_COMMERCE,
+                        {
+                          orderId: order.id,
+                          origin: 'nolimits' as const,
+                          operation: 'fulfill' as const,
+                        },
+                        { priority: 1 }
+                      );
+                      console.log(`[JTLPollingService] Queued commerce sync for shipped order ${order.id}`);
+                    } catch (queueError) {
+                      console.warn(`[JTLPollingService] Failed to queue commerce sync for order ${order.id}:`, queueError);
+                    }
+                  }
 
                   // Log individual state change
                   this.syncLogger.logStateChange({

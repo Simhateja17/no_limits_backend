@@ -147,17 +147,17 @@ async function main() {
           totalOrdersMigrated += ordersToMigrate;
         }
 
-        // Migrate products
-        const productsToMigrate = await prisma.product.count({
+        // Migrate products (ProductChannel many-to-many relationships)
+        const productsToMigrate = await prisma.productChannel.count({
           where: { channelId: removeChannel.id },
         });
 
         if (productsToMigrate > 0) {
-          await prisma.product.updateMany({
+          await prisma.productChannel.updateMany({
             where: { channelId: removeChannel.id },
             data: { channelId: keepChannel.id },
           });
-          console.log(`      → Migrated ${productsToMigrate} products`);
+          console.log(`      → Migrated ${productsToMigrate} product-channel relationships`);
           totalProductsMigrated += productsToMigrate;
         }
 

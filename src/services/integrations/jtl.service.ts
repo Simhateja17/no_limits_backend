@@ -970,6 +970,13 @@ export class JTLService {
       asin?: string;
       han?: string;
     };
+    specifications?: {
+      billOfMaterialsComponents?: Array<{
+        jfsku?: string;
+        merchantSku?: string;
+        quantity: number;
+      }>;
+    };
   }): Promise<{ success: boolean; error?: string }> {
     try {
       await this.request(`/v1/merchant/products/${jfsku}`, {
@@ -1875,8 +1882,14 @@ export class JTLService {
       // Transform order to JTL outbound format
       const outbound = this.transformOrderToOutbound(order);
 
+      // Check if any items are BOM products (bundles)
+      const hasBOMItems = order.items.some((item: any) => item.product?.isBundle);
+
       // Create outbound in JTL-FFN
-      const result = await this.createOutbound(outbound);
+      const result = await this.createOutbound(outbound, {
+        oversale: true,
+        autoCompleteBillOfMaterials: hasBOMItems,
+      });
 
       // Update order with JTL IDs
       await prisma.order.update({

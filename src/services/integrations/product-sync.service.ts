@@ -563,7 +563,7 @@ export class ProductSyncService {
         bundleItems: {
           include: {
             childProduct: {
-              select: { name: true, sku: true, gtin: true },
+              select: { id: true, name: true, sku: true, gtin: true, jtlProductId: true },
             },
           },
         },
@@ -1208,9 +1208,11 @@ export class ProductSyncService {
       bundleItems?: Array<{
         quantity: number;
         childProduct: {
+          id: string;
           name: string;
           sku: string;
           gtin: string | null;
+          jtlProductId: string | null;
         };
       }>;
     },
@@ -1273,6 +1275,16 @@ export class ProductSyncService {
           ean: product.gtin || undefined,
           han: product.han || undefined,
         },
+        ...(product.isBundle && product.bundleItems && product.bundleItems.length > 0 ? {
+          specifications: {
+            billOfMaterialsComponents: product.bundleItems.map(bi => ({
+              ...(bi.childProduct.jtlProductId
+                ? { jfsku: bi.childProduct.jtlProductId }
+                : { merchantSku: bi.childProduct.sku }),
+              quantity: bi.quantity,
+            })),
+          },
+        } : {}),
       });
 
       if (updateResult.success) {
@@ -1303,6 +1315,23 @@ export class ProductSyncService {
       return existingJtlProduct.jfsku;
     }
 
+    // Pre-sync: resolve child product JTL IDs for bundles
+    if (product.isBundle && product.bundleItems && product.bundleItems.length > 0) {
+      for (const bi of product.bundleItems) {
+        if (!bi.childProduct.jtlProductId) {
+          const existing = await jtlService.getProductByMerchantSku(bi.childProduct.sku);
+          if (existing) {
+            await this.prisma.product.update({
+              where: { id: bi.childProduct.id },
+              data: { jtlProductId: existing.jfsku, jtlSyncStatus: 'SYNCED', lastJtlSync: new Date() },
+            });
+            bi.childProduct.jtlProductId = existing.jfsku;
+            console.log(`[ProductSync] Resolved child product ${bi.childProduct.sku} → ${existing.jfsku}`);
+          }
+        }
+      }
+    }
+
     // Product doesn't exist in JTL yet - CREATE it
     console.log(`[ProductSync] Creating new JTL product for SKU: ${product.sku}`);
 
@@ -1320,12 +1349,20 @@ export class ProductSyncService {
       imageUrl: product.imageUrl || undefined,
       attributes: attributes,
       ...(product.isBundle && product.bundleItems && product.bundleItems.length > 0 ? {
-        bundles: product.bundleItems.map(bi => ({
-          name: bi.childProduct.name,
-          quantity: bi.quantity,
-          ean: bi.childProduct.gtin || bi.childProduct.sku,
-          upc: '',
-        })),
+        specifications: {
+          isBillOfMaterials: true,
+          billOfMaterialsComponents: product.bundleItems.map(bi => ({
+            ...(bi.childProduct.jtlProductId
+              ? { jfsku: bi.childProduct.jtlProductId }
+              : { merchantSku: bi.childProduct.sku }),
+            quantity: bi.quantity,
+          })),
+          isBatch: false,
+          isBestBefore: false,
+          isDivisible: false,
+          isPackaging: false,
+          isSerialNumber: false,
+        },
       } : {}),
     };
 

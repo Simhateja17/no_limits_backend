@@ -25,6 +25,8 @@ import {
 } from '@prisma/client';
 import { ShopifyService } from './shopify.service.js';
 import { WooCommerceService } from './woocommerce.service.js';
+import { createShopifyServiceAuto } from './shopify-service-factory.js';
+import { getEncryptionService } from '../encryption.service.js';
 import { JTLService } from './jtl.service.js';
 import ShippingMethodService from '../shipping-method.service.js';
 import { notificationService } from '../notification.service.js';
@@ -1083,30 +1085,73 @@ export class OrderSyncService {
     if (!order.channel) return;
 
     try {
-      const service = this.getCommerceService(order.channel.type);
-      if (!service) return;
-
       // Only sync specific fields that commerce platforms care about
       const syncableFields = ['trackingNumber', 'shippedAt', 'fulfillmentState'];
       const fieldsToSync = changedFields.filter(f => syncableFields.includes(f));
 
       if (fieldsToSync.length === 0) return;
 
-      // Push to commerce platform - use type assertion since method may not exist on all services
-      const updateFn = (service as any).updateOrderFulfillment?.bind(service);
-      if (updateFn) {
-        await updateFn(order.externalOrderId, {
-          trackingNumber: order.trackingNumber,
-          shippedAt: order.shippedAt,
-          status: this.mapFulfillmentStateToCommerceStatus(order.fulfillmentState),
+      const commerceStatus = this.mapFulfillmentStateToCommerceStatus(order.fulfillmentState);
+      const encryptionService = getEncryptionService();
+
+      if (order.channel.type === 'SHOPIFY') {
+        if (!order.channel.shopDomain || !order.channel.accessToken) {
+          console.warn(`[OrderSync] Missing Shopify credentials for channel ${order.channel.id}`);
+          return;
+        }
+
+        const shopifyService = createShopifyServiceAuto({
+          shopDomain: order.channel.shopDomain,
+          accessToken: encryptionService.safeDecrypt(order.channel.accessToken),
         });
-      } else {
-        console.warn(`[OrderSync] ${order.channel.type} does not support updateOrderFulfillment`);
+
+        if (commerceStatus === 'fulfilled' && order.externalOrderId) {
+          const externalOrderId = parseInt(order.externalOrderId);
+          if (!isNaN(externalOrderId)) {
+            try {
+              await shopifyService.createFulfillment(externalOrderId, {
+                tracking_number: order.trackingNumber || undefined,
+                tracking_company: order.carrierSelection || undefined,
+                notify_customer: true,
+              } as any);
+              console.log(`[OrderSync] Created Shopify fulfillment for order ${order.id}`);
+            } catch (fulfillError: any) {
+              if (fulfillError.message?.includes('already fulfilled')) {
+                console.log(`[OrderSync] Order ${order.id} already fulfilled in Shopify`);
+              } else if (fulfillError.message?.includes('on hold')) {
+                console.log(`[OrderSync] Order ${order.id} is on hold in Shopify: ${fulfillError.message}`);
+              } else {
+                throw fulfillError;
+              }
+            }
+          }
+        }
+      } else if (order.channel.type === 'WOOCOMMERCE') {
+        if (!order.channel.apiUrl || !order.channel.apiClientId || !order.channel.apiClientSecret) {
+          console.warn(`[OrderSync] Missing WooCommerce credentials for channel ${order.channel.id}`);
+          return;
+        }
+
+        const wooService = new WooCommerceService({
+          url: order.channel.apiUrl,
+          consumerKey: encryptionService.safeDecrypt(order.channel.apiClientId),
+          consumerSecret: encryptionService.safeDecrypt(order.channel.apiClientSecret),
+        });
+
+        if (order.externalOrderId) {
+          const wooStatus = commerceStatus === 'fulfilled' ? 'completed' : commerceStatus;
+          await wooService.updateOrderStatus(parseInt(order.externalOrderId), wooStatus);
+          console.log(`[OrderSync] Updated WooCommerce order ${order.externalOrderId} to status: ${wooStatus}`);
+        }
       }
 
       await this.prisma.order.update({
         where: { id: order.id },
-        data: { lastSyncedToCommerce: new Date() },
+        data: {
+          lastSyncedToCommerce: new Date(),
+          syncStatus: 'SYNCED',
+          commerceSyncError: null,
+        },
       });
 
       console.log(`[OrderSync] Synced operational fields to ${order.channel.type}: ${fieldsToSync.join(', ')}`);

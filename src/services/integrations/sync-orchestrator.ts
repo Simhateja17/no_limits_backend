@@ -1683,13 +1683,34 @@ export class SyncOrchestrator {
 
             console.log(`[JTL] Order ${order.id} status update: JTL=${update.status} -> status=${newStatus}, fulfillmentState=${newFulfillmentState}`);
 
+            const updateData: Record<string, any> = {
+              status: newStatus,
+              fulfillmentState: newFulfillmentState as any, // Cast to enum type
+              lastJtlSync: new Date(),
+            };
+
+            // If shipped, add shippedAt and try to fetch tracking from JTL
+            if (newStatus === 'SHIPPED') {
+              updateData.shippedAt = new Date();
+
+              try {
+                const notifications = await this.jtlService.getShippingNotifications(update.outboundId);
+                if (notifications.success && notifications.data) {
+                  const trackingInfo = this.jtlService.extractTrackingInfo(notifications.data);
+                  if (trackingInfo.trackingNumber) {
+                    updateData.trackingNumber = trackingInfo.trackingNumber;
+                    updateData.carrierSelection = trackingInfo.carrier || null;
+                    console.log(`[JTL] Fetched tracking for order ${order.id}: ${trackingInfo.trackingNumber} (${trackingInfo.carrier})`);
+                  }
+                }
+              } catch (trackingError) {
+                console.warn(`[JTL] Could not fetch tracking for outbound ${update.outboundId}:`, trackingError);
+              }
+            }
+
             await this.prisma.order.update({
               where: { id: order.id },
-              data: {
-                status: newStatus,
-                fulfillmentState: newFulfillmentState as any, // Cast to enum type
-                lastJtlSync: new Date(),
-              },
+              data: updateData,
             });
 
             // Update e-commerce platform with fulfillment status if shipped
@@ -1840,38 +1861,17 @@ export class SyncOrchestrator {
         // Map status to Shopify fulfillment status
         const fulfillmentStatus = this.mapStatusToShopifyFulfillment(status);
 
-        if (fulfillmentStatus === 'fulfilled' && order.trackingNumber) {
-          // Create fulfillment with tracking info
+        if (fulfillmentStatus === 'fulfilled') {
+          // Create fulfillment in Shopify (with or without tracking)
           const externalOrderId = order.externalOrderId ? parseInt(order.externalOrderId) : null;
           if (externalOrderId) {
             try {
-              // Get the first active location for fulfillment
-              // The GraphQL service handles this automatically, but REST needs it
-              let locationId = 1; // Default fallback
-              try {
-                // Check if getLocations method exists (REST service has it, GraphQL doesn't)
-                if ('getLocations' in shopifyService && typeof (shopifyService as any).getLocations === 'function') {
-                  const locations = await (shopifyService as any).getLocations();
-                  const activeLocation = locations.find((loc: { id: number; name: string; active: boolean }) => loc.active);
-                  if (activeLocation) {
-                    locationId = activeLocation.id;
-                  }
-                }
-              } catch (locError) {
-                console.log(`[SyncOrchestrator] Could not fetch locations, using default: ${locError}`);
-              }
-
-              await shopifyService.createFulfillment(
-                externalOrderId,
-                {
-                  location_id: locationId,
-                  tracking_number: order.trackingNumber,
-                  tracking_company: order.carrierSelection || undefined,
-                  notify_customer: true,
-                  // Don't pass line_items - let the service fulfill all remaining items
-                }
-              );
-              console.log(`[SyncOrchestrator] Created Shopify fulfillment for order ${orderId}`);
+              await shopifyService.createFulfillment(externalOrderId, {
+                tracking_number: order.trackingNumber || undefined,
+                tracking_company: order.carrierSelection || undefined,
+                notify_customer: true,
+              } as any);
+              console.log(`[SyncOrchestrator] Created Shopify fulfillment for order ${orderId}${order.trackingNumber ? ` with tracking ${order.trackingNumber}` : ' (no tracking)'}`);
             } catch (fulfillError: any) {
               // Handle common fulfillment errors gracefully
               if (fulfillError.message?.includes('already fulfilled')) {

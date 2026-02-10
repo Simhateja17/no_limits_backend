@@ -889,24 +889,40 @@ router.put('/products/:id/bundle', async (req: Request, res: Response) => {
       });
     });
 
-    // Queue JTL sync if product has jtlProductId
-    if (product.jtlProductId) {
-      try {
-        const jtlConfig = await prisma.jtlConfig.findUnique({
-          where: { clientId_fk: product.clientId },
-        });
-        if (jtlConfig && jtlConfig.isActive) {
-          const queue = getQueue();
-          await queue.enqueue(
-            QUEUE_NAMES.PRODUCT_SYNC_TO_JTL,
-            { productId: product.id, origin: 'nolimits' },
-            { priority: 1, retryLimit: 3, retryDelay: 60, retryBackoff: true }
-          );
-          console.log(`[DataRoutes] Queued JTL FFN bundle sync for product ${product.sku}`);
+    // Queue JTL sync for bundle: first sync unsynced child products, then parent
+    try {
+      const jtlConfig = await prisma.jtlConfig.findUnique({
+        where: { clientId_fk: product.clientId },
+      });
+      if (jtlConfig && jtlConfig.isActive) {
+        const queue = getQueue();
+
+        // Queue child product syncs first (higher priority, no delay)
+        if (isBundle && items && items.length > 0) {
+          const unsyncedChildren = await prisma.product.findMany({
+            where: { id: { in: items.map((i: any) => i.childProductId) }, jtlProductId: null },
+            select: { id: true, sku: true },
+          });
+          for (const child of unsyncedChildren) {
+            await queue.enqueue(
+              QUEUE_NAMES.PRODUCT_SYNC_TO_JTL,
+              { productId: child.id, origin: 'nolimits' },
+              { priority: 2, retryLimit: 3, retryDelay: 30, retryBackoff: true }
+            );
+            console.log(`[DataRoutes] Queued JTL sync for child product ${child.sku}`);
+          }
         }
-      } catch (syncError) {
-        console.error('[DataRoutes] Failed to queue JTL bundle sync:', syncError);
+
+        // Queue parent bundle sync with delay to give children a head start
+        await queue.enqueue(
+          QUEUE_NAMES.PRODUCT_SYNC_TO_JTL,
+          { productId: product.id, origin: 'nolimits' },
+          { priority: 1, retryLimit: 3, retryDelay: 60, retryBackoff: true, startAfter: 15 }
+        );
+        console.log(`[DataRoutes] Queued JTL FFN bundle sync for product ${product.sku} (15s delay)`);
       }
+    } catch (syncError) {
+      console.error('[DataRoutes] Failed to queue JTL bundle sync:', syncError);
     }
 
     res.json({ success: true, data: updated });

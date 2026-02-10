@@ -195,7 +195,11 @@ export class JTLOrderSyncService {
 
             // Only create if not found in FFN
             const outbound = this.transformOrderToOutbound(order, jtlConfig);
-            const result = await jtlService.createOutbound(outbound);
+            const hasBOMItems = order.items.some((item: any) => item.product?.isBundle);
+            const result = await jtlService.createOutbound(outbound, {
+                oversale: true,
+                autoCompleteBillOfMaterials: hasBOMItems,
+            });
 
             // Update order with JTL IDs
             await this.prisma.order.update({
@@ -369,7 +373,11 @@ export class JTLOrderSyncService {
 
             // Create outbound with only the split items
             const outbound = this.transformOrderToOutbound(order, jtlConfig, items);
-            const result = await jtlService.createOutbound(outbound);
+            const hasBOMItems = order.items.some((item: any) => item.product?.isBundle);
+            const result = await jtlService.createOutbound(outbound, {
+                oversale: true,
+                autoCompleteBillOfMaterials: hasBOMItems,
+            });
 
             // Update order
             await this.prisma.order.update({

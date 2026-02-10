@@ -928,6 +928,24 @@ export const createFulfillment = async (req: Request, res: Response): Promise<vo
       },
     });
 
+    // Queue sync to Shopify/WooCommerce so the commerce platform shows "fulfilled"
+    try {
+      const { getQueue, QUEUE_NAMES } = await import('../services/queue/sync-queue.service.js');
+      const queue = getQueue();
+      await queue.enqueue(
+        QUEUE_NAMES.ORDER_SYNC_TO_COMMERCE,
+        {
+          orderId,
+          origin: 'nolimits' as const,
+          operation: 'fulfill' as const,
+        },
+        { priority: 1 }
+      );
+      console.log(`[Fulfillment] Queued commerce sync for manually fulfilled order ${orderId}`);
+    } catch (queueError) {
+      console.warn(`[Fulfillment] Failed to queue commerce sync for order ${orderId}:`, queueError);
+    }
+
     res.json({
       success: true,
       message: 'Fulfillment created successfully',
