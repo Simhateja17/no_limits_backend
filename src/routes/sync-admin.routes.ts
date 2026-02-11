@@ -739,7 +739,7 @@ export function createSyncAdminRoutes(prisma: PrismaClient): Router {
     try {
       const { orderId } = req.params;
 
-      const result = await jtlOrderSyncService.syncOrderToFFN(orderId);
+      const result = await jtlOrderSyncService.syncOrderToFFN(orderId, { force: true });
 
       if (result.success) {
         res.json({

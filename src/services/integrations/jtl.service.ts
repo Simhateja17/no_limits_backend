@@ -1781,7 +1781,7 @@ export class JTLService {
    * @param prisma - PrismaClient instance for database access
    * @returns The created outbound ID
    */
-  async syncOrderToFfn(orderId: string, prisma: PrismaClient): Promise<{
+  async syncOrderToFfn(orderId: string, prisma: PrismaClient, options?: { force?: boolean }): Promise<{
     success: boolean;
     outboundId?: string;
     error?: string;
@@ -1807,23 +1807,28 @@ export class JTLService {
       }
 
       // Don't sync unpaid orders — block orders on payment hold or with unpaid status
-      const FFN_ALLOWED_PAYMENT_STATUSES = [
-        'paid', 'completed', 'processing', 'refunded',
-        'partially_refunded', 'authorized', 'partially_paid',
-      ];
+      // When force=true (manual sync from UI), skip payment checks entirely
+      if (options?.force) {
+        console.log(`[JTL] Payment guard bypassed for order ${orderId} — manual sync (force=true, paymentStatus: "${order.paymentStatus || 'unknown'}")`);
+      } else {
+        const FFN_ALLOWED_PAYMENT_STATUSES = [
+          'paid', 'completed', 'processing', 'refunded',
+          'partially_refunded', 'authorized', 'partially_paid',
+        ];
 
-      if (order.isOnHold && order.holdReason === 'AWAITING_PAYMENT') {
-        console.log(`[JTL] Blocking order ${orderId} — on payment hold (AWAITING_PAYMENT)`);
-        return { success: false, error: `Order ${orderId} is on payment hold — cannot sync to FFN` };
-      }
+        if (order.isOnHold && order.holdReason === 'AWAITING_PAYMENT') {
+          console.log(`[JTL] Blocking order ${orderId} — on payment hold (AWAITING_PAYMENT)`);
+          return { success: false, error: `Order ${orderId} is on payment hold — cannot sync to FFN` };
+        }
 
-      const paymentStatus = (order.paymentStatus || '').toLowerCase();
-      if (!paymentStatus || !FFN_ALLOWED_PAYMENT_STATUSES.includes(paymentStatus)) {
-        if (order.paymentHoldOverride) {
-          console.log(`[JTL] Payment guard bypassed for order ${orderId} — manual override (paymentStatus: "${order.paymentStatus}")`);
-        } else {
-          console.log(`[JTL] Blocking order ${orderId} — payment status "${order.paymentStatus || 'unknown'}" not in allowed list`);
-          return { success: false, error: `Order ${orderId} has payment status "${order.paymentStatus || 'unknown'}" — cannot sync to FFN until paid` };
+        const paymentStatus = (order.paymentStatus || '').toLowerCase();
+        if (!paymentStatus || !FFN_ALLOWED_PAYMENT_STATUSES.includes(paymentStatus)) {
+          if (order.paymentHoldOverride) {
+            console.log(`[JTL] Payment guard bypassed for order ${orderId} — manual override (paymentStatus: "${order.paymentStatus}")`);
+          } else {
+            console.log(`[JTL] Blocking order ${orderId} — payment status "${order.paymentStatus || 'unknown'}" not in allowed list`);
+            return { success: false, error: `Order ${orderId} has payment status "${order.paymentStatus || 'unknown'}" — cannot sync to FFN until paid` };
+          }
         }
       }
 

@@ -1280,7 +1280,7 @@ export const syncOrderToJTL = async (req: Request, res: Response): Promise<void>
     }
 
     // Sync to JTL FFN
-    const result = await jtlService.syncOrderToFfn(orderId, prisma);
+    const result = await jtlService.syncOrderToFfn(orderId, prisma, { force: true });
 
     if (result.success) {
       res.json({

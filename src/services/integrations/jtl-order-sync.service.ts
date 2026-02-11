@@ -93,7 +93,7 @@ export class JTLOrderSyncService {
     /**
      * Sync order to JTL-FFN (create outbound)
      */
-    async syncOrderToFFN(orderId: string): Promise<{
+    async syncOrderToFFN(orderId: string, options?: { force?: boolean }): Promise<{
         success: boolean;
         outboundId?: string;
         error?: string;
@@ -117,34 +117,45 @@ export class JTLOrderSyncService {
             }
 
             // Don't sync unpaid orders — block orders on payment hold or with unpaid status
-            if (order.isOnHold && order.holdReason === 'AWAITING_PAYMENT') {
-                this.syncLogger.getLogger().warn({
-                    event: 'ffn_sync_blocked_payment_hold',
+            // When force=true (manual sync from UI), skip payment checks entirely
+            if (options?.force) {
+                this.syncLogger.getLogger().info({
+                    event: 'ffn_sync_payment_guard_bypassed',
                     orderId,
                     orderNumber: order.orderNumber,
                     paymentStatus: order.paymentStatus,
-                    holdReason: order.holdReason,
+                    reason: 'manual_sync_force',
                 });
-                return { success: false, error: `Order ${order.orderNumber || orderId} is on payment hold (AWAITING_PAYMENT) — cannot sync to FFN` };
-            }
-
-            const paymentStatus = (order.paymentStatus || '').toLowerCase();
-            if (!paymentStatus || !FFN_ALLOWED_PAYMENT_STATUSES.includes(paymentStatus)) {
-                if (order.paymentHoldOverride) {
-                    this.syncLogger.getLogger().info({
-                        event: 'ffn_sync_payment_override',
-                        orderId,
-                        orderNumber: order.orderNumber,
-                        paymentStatus: order.paymentStatus,
-                    });
-                } else {
+            } else {
+                if (order.isOnHold && order.holdReason === 'AWAITING_PAYMENT') {
                     this.syncLogger.getLogger().warn({
-                        event: 'ffn_sync_blocked_unpaid',
+                        event: 'ffn_sync_blocked_payment_hold',
                         orderId,
                         orderNumber: order.orderNumber,
                         paymentStatus: order.paymentStatus,
+                        holdReason: order.holdReason,
                     });
-                    return { success: false, error: `Order ${order.orderNumber || orderId} has payment status "${order.paymentStatus || 'unknown'}" — cannot sync to FFN until paid` };
+                    return { success: false, error: `Order ${order.orderNumber || orderId} is on payment hold (AWAITING_PAYMENT) — cannot sync to FFN` };
+                }
+
+                const paymentStatus = (order.paymentStatus || '').toLowerCase();
+                if (!paymentStatus || !FFN_ALLOWED_PAYMENT_STATUSES.includes(paymentStatus)) {
+                    if (order.paymentHoldOverride) {
+                        this.syncLogger.getLogger().info({
+                            event: 'ffn_sync_payment_override',
+                            orderId,
+                            orderNumber: order.orderNumber,
+                            paymentStatus: order.paymentStatus,
+                        });
+                    } else {
+                        this.syncLogger.getLogger().warn({
+                            event: 'ffn_sync_blocked_unpaid',
+                            orderId,
+                            orderNumber: order.orderNumber,
+                            paymentStatus: order.paymentStatus,
+                        });
+                        return { success: false, error: `Order ${order.orderNumber || orderId} has payment status "${order.paymentStatus || 'unknown'}" — cannot sync to FFN until paid` };
+                    }
                 }
             }
 
