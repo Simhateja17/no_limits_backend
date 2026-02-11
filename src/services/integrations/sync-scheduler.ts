@@ -213,6 +213,7 @@ export class SyncScheduler {
     const channels = await this.prisma.channel.findMany({
       where: {
         isActive: true,
+        syncEnabled: true,
         type: { in: ['SHOPIFY', 'WOOCOMMERCE'] },
       },
       include: {
@@ -227,6 +228,7 @@ export class SyncScheduler {
     for (const channel of channels) {
       this.channelStates.set(channel.id, {
         channelId: channel.id,
+        lastIncrementalSync: (channel as any).lastOrderPollAt || undefined,
         isRunning: false,
       });
     }
@@ -556,11 +558,50 @@ export class SyncScheduler {
   }
 
   /**
+   * Refresh channel states — adds new channels, removes deactivated ones
+   * Called before each polling cycle to handle channels onboarded/deactivated after startup
+   */
+  private async refreshChannelStates(): Promise<void> {
+    const activeChannels = await this.getActiveChannels();
+    const activeIds = new Set(activeChannels.map(c => c.id));
+
+    // Add new channels that aren't tracked yet
+    for (const channel of activeChannels) {
+      if (!this.channelStates.has(channel.id)) {
+        this.channelStates.set(channel.id, {
+          channelId: channel.id,
+          lastIncrementalSync: (channel as any).lastOrderPollAt || undefined,
+          isRunning: false,
+        });
+        this.logger.info({
+          event: 'channel_added',
+          channelId: channel.id,
+          channelType: channel.type,
+        });
+      }
+    }
+
+    // Remove deactivated channels from state map
+    for (const [channelId, state] of this.channelStates) {
+      if (!activeIds.has(channelId) && !state.isRunning) {
+        this.channelStates.delete(channelId);
+        this.logger.info({
+          event: 'channel_removed',
+          channelId,
+        });
+      }
+    }
+  }
+
+  /**
    * Run incremental sync for all channels
    */
   async runIncrementalSyncForAllChannels(): Promise<SyncJobResult[]> {
     const jobId = generateJobId('sync-inc');
     const startTime = Date.now();
+
+    // Refresh channel list to pick up new/deactivated channels
+    await this.refreshChannelStates();
 
     const channels = await this.getActiveChannels();
 
@@ -576,11 +617,16 @@ export class SyncScheduler {
     // Process channels in batches
     const batches = this.chunkArray(channels, this.config.maxConcurrentSyncs);
 
-    for (const batch of batches) {
+    for (let i = 0; i < batches.length; i++) {
       const batchResults = await Promise.all(
-        batch.map(channel => this.runIncrementalSyncForChannel(channel, jobId))
+        batches[i].map(channel => this.runIncrementalSyncForChannel(channel, jobId))
       );
       results.push(...batchResults);
+
+      // Rate limit: 2s delay between batches to avoid hammering APIs
+      if (i < batches.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
     }
 
     const successCount = results.filter(r => r.success).length;
@@ -753,19 +799,41 @@ export class SyncScheduler {
         throw new Error('Could not create sync orchestrator - missing credentials');
       }
 
-      const since = state.lastIncrementalSync || new Date(Date.now() - 24 * 60 * 60 * 1000); // Default to 24h ago
+      // Apply 10-minute overlap window to avoid missing data at cursor boundaries
+      const OVERLAP_WINDOW_MS = 10 * 60 * 1000;
+      const rawSince = state.lastIncrementalSync || new Date(Date.now() - 24 * 60 * 60 * 1000); // Default to 24h ago
+      const since = new Date(rawSince.getTime() - OVERLAP_WINDOW_MS);
 
       this.logger.debug({
         jobId,
         event: 'sync_execution_started',
         channelId: channel.id,
-        since: since.toISOString()
+        since: since.toISOString(),
+        rawCursor: rawSince.toISOString()
       });
 
       const result = await orchestrator.runIncrementalSync(since);
 
       state.lastIncrementalSync = new Date();
       state.lastError = undefined;
+
+      // Persist cursors to DB for restart resilience
+      try {
+        await this.prisma.channel.update({
+          where: { id: channel.id },
+          data: {
+            lastOrderPollAt: state.lastIncrementalSync,
+            lastProductPollAt: state.lastIncrementalSync,
+          },
+        });
+      } catch (persistError) {
+        this.logger.warn({
+          jobId,
+          event: 'cursor_persist_failed',
+          channelId: channel.id,
+          error: persistError instanceof Error ? persistError.message : 'Unknown error',
+        });
+      }
 
       this.logger.debug({
         jobId,
@@ -1028,6 +1096,7 @@ export class SyncScheduler {
     return this.prisma.channel.findMany({
       where: {
         isActive: true,
+        syncEnabled: true,
         type: { in: ['SHOPIFY', 'WOOCOMMERCE'] },
       },
       include: {

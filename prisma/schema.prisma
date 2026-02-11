@@ -384,6 +384,8 @@ model Channel {
 
   // Sync settings
   lastSyncAt      DateTime?
+  lastOrderPollAt   DateTime?   // Last successful cron poll for orders
+  lastProductPollAt DateTime?   // Last successful cron poll for products
   syncEnabled     Boolean       @default(true)
   isActive        Boolean       @default(true)
 

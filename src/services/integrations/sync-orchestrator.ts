@@ -251,10 +251,17 @@ export class SyncOrchestrator {
         try {
           const localProduct = await this.upsertProductInDB(product);
 
-          // Push to JTL FFN
-          const jtlProduct = await this.pushProductToJTL(localProduct);
-          if (jtlProduct) {
-            await this.updateProductJTLMapping(localProduct.localProductId, jtlProduct.jfsku);
+          // Only push to JTL if not already mapped (prevents redundant API calls)
+          const existingProduct = await this.prisma.product.findUnique({
+            where: { id: localProduct.localProductId },
+            select: { jtlProductId: true },
+          });
+
+          if (!existingProduct?.jtlProductId) {
+            const jtlProduct = await this.pushProductToJTL(localProduct);
+            if (jtlProduct) {
+              await this.updateProductJTLMapping(localProduct.localProductId, jtlProduct.jfsku);
+            }
           }
 
           results.push({
@@ -730,7 +737,21 @@ export class SyncOrchestrator {
 
           // Push to JTL FFN if order is pending or processing
           if (localOrder.status === 'PENDING' || localOrder.status === 'PROCESSING') {
-            await this.pushOrderToJTL(localOrder);
+            // Check payment hold and existing JTL outbound before pushing
+            const dbOrder = await this.prisma.order.findUnique({
+              where: { id: localOrder.localOrderId },
+              select: { isOnHold: true, holdReason: true, jtlOutboundId: true, isCancelled: true },
+            });
+
+            if (dbOrder?.jtlOutboundId) {
+              console.log(`[SyncOrchestrator] Skipping JTL push for order ${order.externalOrderId} — already has outbound ${dbOrder.jtlOutboundId}`);
+            } else if (dbOrder?.isOnHold && dbOrder.holdReason === 'AWAITING_PAYMENT') {
+              console.log(`[SyncOrchestrator] Skipping JTL push for order ${order.externalOrderId} — on AWAITING_PAYMENT hold`);
+            } else if (dbOrder?.isCancelled) {
+              console.log(`[SyncOrchestrator] Skipping JTL push for order ${order.externalOrderId} — cancelled`);
+            } else {
+              await this.pushOrderToJTL(localOrder);
+            }
           }
 
           results.push({
@@ -786,7 +807,24 @@ export class SyncOrchestrator {
 
           // Push to JTL FFN if order is pending or processing
           if (localOrder.status === 'PENDING' || localOrder.status === 'PROCESSING') {
-            await this.pushOrderToJTL(localOrder);
+            // Check payment hold and existing JTL outbound before pushing
+            const dbOrder = await this.prisma.order.findUnique({
+              where: { id: localOrder.localOrderId },
+              select: { isOnHold: true, holdReason: true, jtlOutboundId: true, isCancelled: true },
+            });
+
+            if (dbOrder?.jtlOutboundId) {
+              // Already synced to FFN — skip
+              console.log(`[SyncOrchestrator] Skipping JTL push for order ${order.externalOrderId} — already has outbound ${dbOrder.jtlOutboundId}`);
+            } else if (dbOrder?.isOnHold && dbOrder.holdReason === 'AWAITING_PAYMENT') {
+              // On payment hold — skip
+              console.log(`[SyncOrchestrator] Skipping JTL push for order ${order.externalOrderId} — on AWAITING_PAYMENT hold`);
+            } else if (dbOrder?.isCancelled) {
+              // Cancelled — skip
+              console.log(`[SyncOrchestrator] Skipping JTL push for order ${order.externalOrderId} — cancelled`);
+            } else {
+              await this.pushOrderToJTL(localOrder);
+            }
           }
 
           results.push({
@@ -833,10 +871,10 @@ export class SyncOrchestrator {
     const orders: OrderSyncData[] = [];
 
     if (this.config.channelType === 'SHOPIFY' && this.shopifyService) {
-      // For historic sync with a date, use created_at filter
-      // For regular incremental sync (no date), get all orders
+      // For incremental sync, use updated_at filter to catch payment status changes
+      // For full sync (no date), get all orders
       const shopifyOrders = since
-        ? await this.shopifyService.getOrdersCreatedSince(since)
+        ? await this.shopifyService.getOrdersUpdatedSince(since)
         : await this.shopifyService.getAllOrders({ status: 'any' });
 
       let ordersWithoutAddress = 0;
@@ -850,11 +888,11 @@ export class SyncOrchestrator {
     } else if (this.config.channelType === 'WOOCOMMERCE' && this.wooCommerceService) {
       console.log('[pullOrdersFromChannel] Calling WooCommerce API...');
 
-      // For historic sync with a date, use created_at filter
+      // For incremental sync, use updated_at filter to catch payment status changes
       let wooOrders: any[];
       try {
         wooOrders = since
-          ? await this.wooCommerceService.getOrdersCreatedSince(since)
+          ? await this.wooCommerceService.getOrdersUpdatedSince(since)
           : await this.wooCommerceService.getAllOrders();
 
         console.log(`[pullOrdersFromChannel] ✅ WooCommerce returned ${wooOrders.length} orders`);
@@ -975,13 +1013,61 @@ export class SyncOrchestrator {
     });
 
     if (existingOrder) {
-      // Update existing order
+      // Determine current payment status from platform data
+      const isWooCommerce = channel.type === 'WOOCOMMERCE';
+      const newPaymentStatus = isWooCommerce
+        ? mapWooCommercePaymentStatus(orderData.status)
+        : orderData.paymentStatus;
+
+      const updateData: Record<string, any> = {
+        updatedAt: new Date(),
+      };
+
+      // Update payment status if it changed
+      if (newPaymentStatus && newPaymentStatus !== existingOrder.paymentStatus) {
+        updateData.paymentStatus = newPaymentStatus;
+        console.log(`[SyncOrchestrator] Payment status changed for order ${orderData.externalOrderId}: ${existingOrder.paymentStatus} -> ${newPaymentStatus}`);
+
+        // Check if payment hold should be released
+        const wasOnPaymentHold = existingOrder.isOnHold && existingOrder.holdReason === 'AWAITING_PAYMENT';
+        const isNowPaid = isWooCommerce
+          ? !shouldHoldWooCommerceOrderForPayment(orderData.status)
+          : !shouldHoldShopifyOrderForPayment(newPaymentStatus);
+
+        if (wasOnPaymentHold && isNowPaid) {
+          // Release payment hold
+          updateData.isOnHold = false;
+          updateData.holdReason = null;
+          updateData.holdReleasedAt = new Date();
+          updateData.holdReleasedBy = 'CRON_POLL';
+          console.log(`[SyncOrchestrator] Released AWAITING_PAYMENT hold for order ${orderData.externalOrderId}`);
+        }
+
+        // Handle refunded orders
+        if (newPaymentStatus === 'refunded' && !existingOrder.isCancelled) {
+          updateData.status = 'CANCELLED';
+          updateData.fulfillmentState = 'CANCELED';
+          updateData.isCancelled = true;
+          updateData.cancelledAt = new Date();
+          updateData.cancelledBy = isWooCommerce ? 'WOOCOMMERCE' : 'SHOPIFY';
+          updateData.cancellationReason = 'Refunded on platform';
+          // Also release any hold since order is being cancelled
+          updateData.isOnHold = false;
+          updateData.holdReason = null;
+          console.log(`[SyncOrchestrator] Marking refunded order ${orderData.externalOrderId} as cancelled`);
+        }
+      }
+
       const updatedOrder = await this.prisma.order.update({
         where: { id: existingOrder.id },
-        data: {
-          updatedAt: new Date(),
-        },
+        data: updateData,
       });
+
+      // If payment hold was just released, queue for FFN sync
+      if (updateData.holdReleasedBy === 'CRON_POLL' && !existingOrder.jtlOutboundId && !updatedOrder.isCancelled) {
+        console.log(`[SyncOrchestrator] Queueing order ${orderData.externalOrderId} for FFN sync after payment hold release`);
+        await this.queueOrderForFfnSync(updatedOrder.id, updatedOrder.orderNumber || updatedOrder.orderId);
+      }
 
       this.orderUpsertStats.updated++;
 

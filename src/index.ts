@@ -5,11 +5,13 @@ import morgan from 'morgan';
 import cookieParser from 'cookie-parser';
 import { createServer } from 'http';
 import { env, prisma } from './config/index.js';
-import routes, { 
-  initializeIntegrations, 
-  initializeEnhancedSync, 
+import routes, {
+  initializeIntegrations,
+  initializeEnhancedSync,
   startEnhancedSyncProcessors,
-  stopEnhancedSyncProcessors
+  stopEnhancedSyncProcessors,
+  startSyncScheduler,
+  stopSyncScheduler
 } from './routes/index.js';
 import { initializeSocket } from './services/socket.js';
 
@@ -135,6 +137,11 @@ httpServer.listen(PORT, HOST, async () => {
   if (queueInitialized) {
     console.log('   - Background Job Queue (PostgreSQL-based)');
   }
+
+  // Start cron-based fallback polling scheduler
+  await startSyncScheduler();
+  console.log('   - Sync Scheduler (incremental every 5min, full every 24h)');
+
   console.log('\n✨ All systems operational!\n');
 });
 
@@ -147,6 +154,10 @@ const shutdown = async () => {
     await shutdownQueue();
     console.log('✅ Background queue stopped');
   }
+
+  // Stop sync scheduler
+  stopSyncScheduler();
+  console.log('✅ Sync scheduler stopped');
 
   // Stop sync processors
   stopEnhancedSyncProcessors();
