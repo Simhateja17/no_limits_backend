@@ -1,0 +1,307 @@
+{
+  "generatedAt": "2026-02-11T06:10:13.487Z",
+  "summary": {
+    "totalOrders": 13,
+    "blocked": 0,
+    "ready": 9,
+    "alreadySynced": 4
+  },
+  "diagnostics": [
+    {
+      "orderNumber": "15990",
+      "orderId": "WOO-15990",
+      "customerName": "Matthias Nitschke",
+      "blockers": [],
+      "warnings": [
+        "Already synced - FFN Order ID: 6EN7028W4DF2JHUJ"
+      ],
+      "metadata": {
+        "paymentStatus": "paid",
+        "isOnHold": false,
+        "holdReason": null,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "SHIPPED",
+        "totalAmount": "€56.58",
+        "itemCount": 1,
+        "jtlFfnOrderId": "6EN7028W4DF2JHUJ",
+        "syncStatus": "SYNCED",
+        "ffnSyncError": null,
+        "channelType": "WOOCOMMERCE",
+        "clientId": "cml7yr6pg0001mbs1jiw2rpn5",
+        "hasJtlConfig": true
+      }
+    },
+    {
+      "orderNumber": "15906",
+      "orderId": "ORD-1770207917604",
+      "customerName": null,
+      "blockers": [],
+      "warnings": [
+        "Order total is €0.00 (may need recalculation)"
+      ],
+      "metadata": {
+        "paymentStatus": "paid",
+        "isOnHold": false,
+        "holdReason": null,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "ACKNOWLEDGED",
+        "totalAmount": "€0.00",
+        "itemCount": 3,
+        "jtlFfnOrderId": null,
+        "syncStatus": "PENDING",
+        "ffnSyncError": null,
+        "channelType": "WOOCOMMERCE",
+        "clientId": "cml7yr6pg0001mbs1jiw2rpn5",
+        "hasJtlConfig": true
+      }
+    },
+    {
+      "orderNumber": "15925",
+      "orderId": "WOO-15925",
+      "customerName": "Nick Lehnert",
+      "blockers": [],
+      "warnings": [
+        "Already synced - FFN Order ID: 6EN70282VANWT2KV"
+      ],
+      "metadata": {
+        "paymentStatus": "paid",
+        "isOnHold": false,
+        "holdReason": null,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "CANCELED",
+        "totalAmount": "€30.07",
+        "itemCount": 1,
+        "jtlFfnOrderId": "6EN70282VANWT2KV",
+        "syncStatus": "SYNCED",
+        "ffnSyncError": null,
+        "channelType": "WOOCOMMERCE",
+        "clientId": "cml7yr6pg0001mbs1jiw2rpn5",
+        "hasJtlConfig": true
+      }
+    },
+    {
+      "orderNumber": "15926",
+      "orderId": "WOO-15926",
+      "customerName": "Andreas Jung",
+      "blockers": [],
+      "warnings": [
+        "Already synced - FFN Order ID: 6EN702Y1TPDVV5L5"
+      ],
+      "metadata": {
+        "paymentStatus": "paid",
+        "isOnHold": false,
+        "holdReason": null,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "CANCELED",
+        "totalAmount": "€112.48",
+        "itemCount": 1,
+        "jtlFfnOrderId": "6EN702Y1TPDVV5L5",
+        "syncStatus": "SYNCED",
+        "ffnSyncError": null,
+        "channelType": "WOOCOMMERCE",
+        "clientId": "cml7yr6pg0001mbs1jiw2rpn5",
+        "hasJtlConfig": true
+      }
+    },
+    {
+      "orderNumber": "15977",
+      "orderId": "WOO-15977",
+      "customerName": "Andreas Bothe",
+      "blockers": [],
+      "warnings": [],
+      "metadata": {
+        "paymentStatus": "paid",
+        "isOnHold": false,
+        "holdReason": null,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "PENDING",
+        "totalAmount": "€46.16",
+        "itemCount": 3,
+        "jtlFfnOrderId": null,
+        "syncStatus": "PENDING",
+        "ffnSyncError": null,
+        "channelType": "WOOCOMMERCE",
+        "clientId": "cml7yr6pg0001mbs1jiw2rpn5",
+        "hasJtlConfig": true
+      }
+    },
+    {
+      "orderNumber": "15978",
+      "orderId": "WOO-15978",
+      "customerName": "Phillip von Daake",
+      "blockers": [],
+      "warnings": [],
+      "metadata": {
+        "paymentStatus": "paid",
+        "isOnHold": false,
+        "holdReason": null,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "PENDING",
+        "totalAmount": "€75.75",
+        "itemCount": 2,
+        "jtlFfnOrderId": null,
+        "syncStatus": "PENDING",
+        "ffnSyncError": null,
+        "channelType": "WOOCOMMERCE",
+        "clientId": "cml7yr6pg0001mbs1jiw2rpn5",
+        "hasJtlConfig": true
+      }
+    },
+    {
+      "orderNumber": "15979",
+      "orderId": "WOO-15979",
+      "customerName": "Marco Olavarria",
+      "blockers": [],
+      "warnings": [],
+      "metadata": {
+        "paymentStatus": "paid",
+        "isOnHold": false,
+        "holdReason": null,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "PENDING",
+        "totalAmount": "€21.80",
+        "itemCount": 1,
+        "jtlFfnOrderId": null,
+        "syncStatus": "PENDING",
+        "ffnSyncError": null,
+        "channelType": "WOOCOMMERCE",
+        "clientId": "cml7yr6pg0001mbs1jiw2rpn5",
+        "hasJtlConfig": true
+      }
+    },
+    {
+      "orderNumber": "15981",
+      "orderId": "WOO-15981",
+      "customerName": "Gerhard Müller",
+      "blockers": [],
+      "warnings": [],
+      "metadata": {
+        "paymentStatus": "paid",
+        "isOnHold": false,
+        "holdReason": null,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "PENDING",
+        "totalAmount": "€57.85",
+        "itemCount": 1,
+        "jtlFfnOrderId": null,
+        "syncStatus": "PENDING",
+        "ffnSyncError": null,
+        "channelType": "WOOCOMMERCE",
+        "clientId": "cml7yr6pg0001mbs1jiw2rpn5",
+        "hasJtlConfig": true
+      }
+    },
+    {
+      "orderNumber": "15982",
+      "orderId": "WOO-15982",
+      "customerName": "Matthew Douglas",
+      "blockers": [],
+      "warnings": [],
+      "metadata": {
+        "paymentStatus": "paid",
+        "isOnHold": false,
+        "holdReason": null,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "PENDING",
+        "totalAmount": "€25.07",
+        "itemCount": 1,
+        "jtlFfnOrderId": null,
+        "syncStatus": "PENDING",
+        "ffnSyncError": null,
+        "channelType": "WOOCOMMERCE",
+        "clientId": "cml7yr6pg0001mbs1jiw2rpn5",
+        "hasJtlConfig": true
+      }
+    },
+    {
+      "orderNumber": "15984",
+      "orderId": "WOO-15984",
+      "customerName": "Manja Fritsch",
+      "blockers": [],
+      "warnings": [],
+      "metadata": {
+        "paymentStatus": "paid",
+        "isOnHold": false,
+        "holdReason": null,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "PENDING",
+        "totalAmount": "€68.77",
+        "itemCount": 2,
+        "jtlFfnOrderId": null,
+        "syncStatus": "PENDING",
+        "ffnSyncError": null,
+        "channelType": "WOOCOMMERCE",
+        "clientId": "cml7yr6pg0001mbs1jiw2rpn5",
+        "hasJtlConfig": true
+      }
+    },
+    {
+      "orderNumber": "15986",
+      "orderId": "WOO-15986",
+      "customerName": "Lars Hartnauer",
+      "blockers": [],
+      "warnings": [],
+      "metadata": {
+        "paymentStatus": "paid",
+        "isOnHold": false,
+        "holdReason": null,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "PENDING",
+        "totalAmount": "€26.34",
+        "itemCount": 2,
+        "jtlFfnOrderId": null,
+        "syncStatus": "PENDING",
+        "ffnSyncError": null,
+        "channelType": "WOOCOMMERCE",
+        "clientId": "cml7yr6pg0001mbs1jiw2rpn5",
+        "hasJtlConfig": true
+      }
+    },
+    {
+      "orderNumber": "15987",
+      "orderId": "WOO-15987",
+      "customerName": "Nassira Boudhan",
+      "blockers": [],
+      "warnings": [],
+      "metadata": {
+        "paymentStatus": "paid",
+        "isOnHold": false,
+        "holdReason": null,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "PENDING",
+        "totalAmount": "€64.05",
+        "itemCount": 1,
+        "jtlFfnOrderId": null,
+        "syncStatus": "PENDING",
+        "ffnSyncError": null,
+        "channelType": "WOOCOMMERCE",
+        "clientId": "cml7yr6pg0001mbs1jiw2rpn5",
+        "hasJtlConfig": true
+      }
+    },
+    {
+      "orderNumber": "15989",
+      "orderId": "WOO-15989",
+      "customerName": "Andreas Aufleger",
+      "blockers": [],
+      "warnings": [
+        "Already synced - FFN Order ID: 6EN7025QUGHT3HFP"
+      ],
+      "metadata": {
+        "paymentStatus": "paid",
+        "isOnHold": false,
+        "holdReason": null,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "ACKNOWLEDGED",
+        "totalAmount": "€285.30",
+        "itemCount": 2,
+        "jtlFfnOrderId": "6EN7025QUGHT3HFP",
+        "syncStatus": "SYNCED",
+        "ffnSyncError": null,
+        "channelType": "WOOCOMMERCE",
+        "clientId": "cml7yr6pg0001mbs1jiw2rpn5",
+        "hasJtlConfig": true
+      }
+    }
+  ]
+}

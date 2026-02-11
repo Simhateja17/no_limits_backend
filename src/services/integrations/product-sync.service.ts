@@ -368,6 +368,8 @@ export class ProductSyncService {
             seoTitle: data.seoTitle,
             seoDescription: data.seoDescription,
             isActive: data.isActive ?? (data.status === 'active' || data.status === 'publish'),
+            isBundle: data.isBundle ?? false,  // Bundle status from commerce platform
+            bundlePrice: data.isBundle ? data.price : null,  // Bundle price from commerce platform
             lastUpdatedBy: this.mapOriginToEnum(origin),
             syncStatus: 'PENDING',
             channels: {
@@ -1682,6 +1684,8 @@ export class ProductSyncService {
       vendor: { value: incomingData.vendor, ownership: 'commerce' },
       seoTitle: { value: incomingData.seoTitle, ownership: 'commerce' },
       seoDescription: { value: incomingData.seoDescription, ownership: 'commerce' },
+      isBundle: { value: incomingData.isBundle, ownership: 'commerce' },  // Bundle status defined by commerce platform
+      bundlePrice: { value: incomingData.isBundle ? incomingData.price : undefined, ownership: 'commerce' },  // Bundle price from commerce platform
       sku: { value: incomingData.sku, ownership: 'ops' },
       gtin: { value: incomingData.gtin, ownership: 'ops' },
       weightInKg: { value: this.normalizeWeight(incomingData.weight, incomingData.weightUnit), ownership: 'ops' },

@@ -7,6 +7,7 @@ import { Router, Request, Response } from 'express';
 import { prisma } from '../config/database.js';
 import { authenticate } from '../middleware/auth.js';
 import { getQueue, QUEUE_NAMES } from '../services/queue/sync-queue.service.js';
+import { enrichProductWithPossibleQuantity } from '../utils/bundle-calculator.js';
 
 const router = Router();
 
@@ -20,6 +21,7 @@ router.use(authenticate);
 router.get('/products', async (req: Request, res: Response) => {
   try {
     const userId = (req as any).userId;
+    const { includeBundleDetails } = req.query;
 
     // Get user with client relation
     const user = await prisma.user.findUnique({
@@ -40,44 +42,100 @@ router.get('/products', async (req: Request, res: Response) => {
       ? { clientId: user.client.id }
       : {};
 
-    const products = await prisma.product.findMany({
-      where: {
-        ...whereClause,
-        isActive: true,
-      },
-      select: {
-        id: true,
-        productId: true,
-        name: true,
-        sku: true,
-        gtin: true,
-        available: true,
-        reserved: true,
-        announced: true,
-        weightInKg: true,
-        imageUrl: true,
-        jtlProductId: true,
-        jtlSyncStatus: true,
-        lastJtlSync: true,
-        isBundle: true,
-        clientId: true,
-        client: {
-          select: {
-            companyName: true,
-            name: true,
+    // Use different query structure based on whether bundle details are needed
+    const products = includeBundleDetails === 'true'
+      ? await prisma.product.findMany({
+          where: {
+            ...whereClause,
+            isActive: true,
           },
-        },
-        createdAt: true,
-        updatedAt: true,
-      },
-      orderBy: {
-        createdAt: 'desc',
-      },
-    });
+          select: {
+            id: true,
+            productId: true,
+            name: true,
+            sku: true,
+            gtin: true,
+            available: true,
+            reserved: true,
+            announced: true,
+            weightInKg: true,
+            imageUrl: true,
+            jtlProductId: true,
+            jtlSyncStatus: true,
+            lastJtlSync: true,
+            isBundle: true,
+            bundlePrice: true,
+            clientId: true,
+            client: {
+              select: {
+                companyName: true,
+                name: true,
+              },
+            },
+            bundleItems: {
+              select: {
+                id: true,
+                quantity: true,
+                childProductId: true,
+                childProduct: {
+                  select: {
+                    id: true,
+                    available: true,
+                  },
+                },
+              },
+            },
+            createdAt: true,
+            updatedAt: true,
+          },
+          orderBy: {
+            createdAt: 'desc',
+          },
+        })
+      : await prisma.product.findMany({
+          where: {
+            ...whereClause,
+            isActive: true,
+          },
+          select: {
+            id: true,
+            productId: true,
+            name: true,
+            sku: true,
+            gtin: true,
+            available: true,
+            reserved: true,
+            announced: true,
+            weightInKg: true,
+            imageUrl: true,
+            jtlProductId: true,
+            jtlSyncStatus: true,
+            lastJtlSync: true,
+            isBundle: true,
+            bundlePrice: true,
+            clientId: true,
+            client: {
+              select: {
+                companyName: true,
+                name: true,
+              },
+            },
+            createdAt: true,
+            updatedAt: true,
+          },
+          orderBy: {
+            createdAt: 'desc',
+          },
+        });
+
+    // Enrich products with possibleQuantity if bundle details were requested
+    const enrichedProducts = includeBundleDetails === 'true'
+      ? products.map(enrichProductWithPossibleQuantity)
+      : products;
 
     res.json({
       success: true,
-      data: products,
+      data: enrichedProducts,
     });
   } catch (error) {
     console.error('Error fetching products:', error);
@@ -611,9 +669,12 @@ router.get('/products/:id', async (req: Request, res: Response) => {
       });
     }
 
+    // Enrich product with possibleQuantity for bundles
+    const enrichedProduct = enrichProductWithPossibleQuantity(product);
+
     res.json({
       success: true,
-      data: product,
+      data: enrichedProduct,
     });
   } catch (error) {
     console.error('Error fetching product:', error);

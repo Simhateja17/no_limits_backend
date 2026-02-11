@@ -1,0 +1,401 @@
+{
+  "generatedAt": "2026-02-11T06:13:34.870Z",
+  "summary": {
+    "totalOrders": 13,
+    "successfulSyncs": 12,
+    "failedSyncs": 1,
+    "averageSyncTimeMs": 2029
+  },
+  "results": [
+    {
+      "orderNumber": "15990",
+      "orderId": "WOO-15990",
+      "customerName": "Matthias Nitschke",
+      "preFixStatus": {
+        "isOnHold": false,
+        "holdReason": null,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "SHIPPED",
+        "totalAmount": 56.58,
+        "jtlFfnOrderId": "6EN7028W4DF2JHUJ",
+        "ffnSyncError": null
+      },
+      "actionsPerformed": [
+        "Synced to FFN (outboundId: 6EN7028W4DF2JHUJ)"
+      ],
+      "syncResult": {
+        "success": true,
+        "outboundId": "6EN7028W4DF2JHUJ",
+        "syncTimeMs": 1543
+      },
+      "postFixStatus": {
+        "isOnHold": false,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "SHIPPED",
+        "totalAmount": 56.58,
+        "jtlFfnOrderId": "6EN7028W4DF2JHUJ",
+        "syncStatus": "SYNCED"
+      }
+    },
+    {
+      "orderNumber": "15906",
+      "orderId": "ORD-1770207917604",
+      "customerName": null,
+      "preFixStatus": {
+        "isOnHold": false,
+        "holdReason": null,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "ACKNOWLEDGED",
+        "totalAmount": 0,
+        "jtlFfnOrderId": "6EN7022HGHWJTLD9",
+        "ffnSyncError": null
+      },
+      "actionsPerformed": [
+        "Synced to FFN (outboundId: 6EN7022HGHWJTLD9)"
+      ],
+      "syncResult": {
+        "success": true,
+        "outboundId": "6EN7022HGHWJTLD9",
+        "syncTimeMs": 1547
+      },
+      "postFixStatus": {
+        "isOnHold": false,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "ACKNOWLEDGED",
+        "totalAmount": 0,
+        "jtlFfnOrderId": "6EN7022HGHWJTLD9",
+        "syncStatus": "SYNCED"
+      }
+    },
+    {
+      "orderNumber": "15925",
+      "orderId": "WOO-15925",
+      "customerName": "Nick Lehnert",
+      "preFixStatus": {
+        "isOnHold": false,
+        "holdReason": null,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "CANCELED",
+        "totalAmount": 30.07,
+        "jtlFfnOrderId": "6EN70282VANWT2KV",
+        "ffnSyncError": null
+      },
+      "actionsPerformed": [
+        "Synced to FFN (outboundId: 6EN70282VANWT2KV)"
+      ],
+      "syncResult": {
+        "success": true,
+        "outboundId": "6EN70282VANWT2KV",
+        "syncTimeMs": 2399
+      },
+      "postFixStatus": {
+        "isOnHold": false,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "CANCELED",
+        "totalAmount": 30.07,
+        "jtlFfnOrderId": "6EN70282VANWT2KV",
+        "syncStatus": "SYNCED"
+      }
+    },
+    {
+      "orderNumber": "15926",
+      "orderId": "WOO-15926",
+      "customerName": "Andreas Jung",
+      "preFixStatus": {
+        "isOnHold": false,
+        "holdReason": null,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "CANCELED",
+        "totalAmount": 112.48,
+        "jtlFfnOrderId": "6EN702Y1TPDVV5L5",
+        "ffnSyncError": null
+      },
+      "actionsPerformed": [
+        "Synced to FFN (outboundId: 6EN702Y1TPDVV5L5)"
+      ],
+      "syncResult": {
+        "success": true,
+        "outboundId": "6EN702Y1TPDVV5L5",
+        "syncTimeMs": 1654
+      },
+      "postFixStatus": {
+        "isOnHold": false,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "CANCELED",
+        "totalAmount": 112.48,
+        "jtlFfnOrderId": "6EN702Y1TPDVV5L5",
+        "syncStatus": "SYNCED"
+      }
+    },
+    {
+      "orderNumber": "15977",
+      "orderId": "WOO-15977",
+      "customerName": "Andreas Bothe",
+      "preFixStatus": {
+        "isOnHold": false,
+        "holdReason": null,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "ACKNOWLEDGED",
+        "totalAmount": 46.16,
+        "jtlFfnOrderId": "6EN702CQEJHUC4V5",
+        "ffnSyncError": null
+      },
+      "actionsPerformed": [
+        "Synced to FFN (outboundId: 6EN702CQEJHUC4V5)"
+      ],
+      "syncResult": {
+        "success": true,
+        "outboundId": "6EN702CQEJHUC4V5",
+        "syncTimeMs": 1564
+      },
+      "postFixStatus": {
+        "isOnHold": false,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "ACKNOWLEDGED",
+        "totalAmount": 46.16,
+        "jtlFfnOrderId": "6EN702CQEJHUC4V5",
+        "syncStatus": "SYNCED"
+      }
+    },
+    {
+      "orderNumber": "15978",
+      "orderId": "WOO-15978",
+      "customerName": "Phillip von Daake",
+      "preFixStatus": {
+        "isOnHold": false,
+        "holdReason": null,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "ACKNOWLEDGED",
+        "totalAmount": 75.75,
+        "jtlFfnOrderId": "6EN702X75H72TSRX",
+        "ffnSyncError": null
+      },
+      "actionsPerformed": [
+        "Synced to FFN (outboundId: 6EN702X75H72TSRX)"
+      ],
+      "syncResult": {
+        "success": true,
+        "outboundId": "6EN702X75H72TSRX",
+        "syncTimeMs": 1600
+      },
+      "postFixStatus": {
+        "isOnHold": false,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "ACKNOWLEDGED",
+        "totalAmount": 75.75,
+        "jtlFfnOrderId": "6EN702X75H72TSRX",
+        "syncStatus": "SYNCED"
+      }
+    },
+    {
+      "orderNumber": "15979",
+      "orderId": "WOO-15979",
+      "customerName": "Marco Olavarria",
+      "preFixStatus": {
+        "isOnHold": false,
+        "holdReason": null,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "ACKNOWLEDGED",
+        "totalAmount": 21.8,
+        "jtlFfnOrderId": "6EN702QK64GUXXN3",
+        "ffnSyncError": null
+      },
+      "actionsPerformed": [
+        "Synced to FFN (outboundId: 6EN702QK64GUXXN3)"
+      ],
+      "syncResult": {
+        "success": true,
+        "outboundId": "6EN702QK64GUXXN3",
+        "syncTimeMs": 1367
+      },
+      "postFixStatus": {
+        "isOnHold": false,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "ACKNOWLEDGED",
+        "totalAmount": 21.8,
+        "jtlFfnOrderId": "6EN702QK64GUXXN3",
+        "syncStatus": "SYNCED"
+      }
+    },
+    {
+      "orderNumber": "15981",
+      "orderId": "WOO-15981",
+      "customerName": "Gerhard Müller",
+      "preFixStatus": {
+        "isOnHold": false,
+        "holdReason": null,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "PENDING",
+        "totalAmount": 57.85,
+        "jtlFfnOrderId": "6EN7026D1WG7HGPN",
+        "ffnSyncError": null
+      },
+      "actionsPerformed": [
+        "Synced to FFN (outboundId: 6EN7026D1WG7HGPN)"
+      ],
+      "syncResult": {
+        "success": true,
+        "outboundId": "6EN7026D1WG7HGPN",
+        "syncTimeMs": 2226
+      },
+      "postFixStatus": {
+        "isOnHold": false,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "PENDING",
+        "totalAmount": 57.85,
+        "jtlFfnOrderId": "6EN7026D1WG7HGPN",
+        "syncStatus": "SYNCED"
+      }
+    },
+    {
+      "orderNumber": "15982",
+      "orderId": "WOO-15982",
+      "customerName": "Matthew Douglas",
+      "preFixStatus": {
+        "isOnHold": false,
+        "holdReason": null,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "PENDING",
+        "totalAmount": 25.07,
+        "jtlFfnOrderId": "6EN702W5VWWB87CE",
+        "ffnSyncError": null
+      },
+      "actionsPerformed": [
+        "Synced to FFN (outboundId: 6EN702W5VWWB87CE)"
+      ],
+      "syncResult": {
+        "success": true,
+        "outboundId": "6EN702W5VWWB87CE",
+        "syncTimeMs": 1392
+      },
+      "postFixStatus": {
+        "isOnHold": false,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "PENDING",
+        "totalAmount": 25.07,
+        "jtlFfnOrderId": "6EN702W5VWWB87CE",
+        "syncStatus": "SYNCED"
+      }
+    },
+    {
+      "orderNumber": "15984",
+      "orderId": "WOO-15984",
+      "customerName": "Manja Fritsch",
+      "preFixStatus": {
+        "isOnHold": false,
+        "holdReason": null,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "PENDING",
+        "totalAmount": 68.77,
+        "jtlFfnOrderId": null,
+        "ffnSyncError": null
+      },
+      "actionsPerformed": [
+        "FFN sync failed: fetch failed"
+      ],
+      "syncResult": {
+        "success": false,
+        "error": "fetch failed",
+        "syncTimeMs": 13904
+      },
+      "postFixStatus": {
+        "isOnHold": false,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "PENDING",
+        "totalAmount": 68.77,
+        "jtlFfnOrderId": null,
+        "syncStatus": "ERROR"
+      }
+    },
+    {
+      "orderNumber": "15986",
+      "orderId": "WOO-15986",
+      "customerName": "Lars Hartnauer",
+      "preFixStatus": {
+        "isOnHold": false,
+        "holdReason": null,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "PENDING",
+        "totalAmount": 26.34,
+        "jtlFfnOrderId": null,
+        "ffnSyncError": null
+      },
+      "actionsPerformed": [
+        "Synced to FFN (outboundId: 6EN702AZ7UT5BBWN)"
+      ],
+      "syncResult": {
+        "success": true,
+        "outboundId": "6EN702AZ7UT5BBWN",
+        "syncTimeMs": 3864
+      },
+      "postFixStatus": {
+        "isOnHold": false,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "PENDING",
+        "totalAmount": 26.34,
+        "jtlFfnOrderId": "6EN702AZ7UT5BBWN",
+        "syncStatus": "SYNCED"
+      }
+    },
+    {
+      "orderNumber": "15987",
+      "orderId": "WOO-15987",
+      "customerName": "Nassira Boudhan",
+      "preFixStatus": {
+        "isOnHold": false,
+        "holdReason": null,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "PENDING",
+        "totalAmount": 64.05,
+        "jtlFfnOrderId": null,
+        "ffnSyncError": null
+      },
+      "actionsPerformed": [
+        "Synced to FFN (outboundId: 6EN702LL71Z5922A)"
+      ],
+      "syncResult": {
+        "success": true,
+        "outboundId": "6EN702LL71Z5922A",
+        "syncTimeMs": 2979
+      },
+      "postFixStatus": {
+        "isOnHold": false,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "PENDING",
+        "totalAmount": 64.05,
+        "jtlFfnOrderId": "6EN702LL71Z5922A",
+        "syncStatus": "SYNCED"
+      }
+    },
+    {
+      "orderNumber": "15989",
+      "orderId": "WOO-15989",
+      "customerName": "Andreas Aufleger",
+      "preFixStatus": {
+        "isOnHold": false,
+        "holdReason": null,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "ACKNOWLEDGED",
+        "totalAmount": 285.3,
+        "jtlFfnOrderId": "6EN7025QUGHT3HFP",
+        "ffnSyncError": null
+      },
+      "actionsPerformed": [
+        "Synced to FFN (outboundId: 6EN7025QUGHT3HFP)"
+      ],
+      "syncResult": {
+        "success": true,
+        "outboundId": "6EN7025QUGHT3HFP",
+        "syncTimeMs": 2218
+      },
+      "postFixStatus": {
+        "isOnHold": false,
+        "orderOrigin": "WOOCOMMERCE",
+        "fulfillmentState": "ACKNOWLEDGED",
+        "totalAmount": 285.3,
+        "jtlFfnOrderId": "6EN7025QUGHT3HFP",
+        "syncStatus": "SYNCED"
+      }
+    }
+  ]
+}
