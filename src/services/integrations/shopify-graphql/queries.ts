@@ -532,6 +532,27 @@ export const GET_PRODUCTS_QUERY = `
               }
             }
           }
+          bundleComponents(first: 20) {
+            edges {
+              node {
+                componentProduct {
+                  id
+                  legacyResourceId
+                  title
+                  variants(first: 1) {
+                    edges {
+                      node {
+                        id
+                        legacyResourceId
+                        sku
+                      }
+                    }
+                  }
+                }
+                quantity
+              }
+            }
+          }
         }
       }
     }
@@ -565,6 +586,27 @@ export const GET_PRODUCT_QUERY = `
         edges {
           node {
             ...ProductImageFields
+          }
+        }
+      }
+      bundleComponents(first: 20) {
+        edges {
+          node {
+            componentProduct {
+              id
+              legacyResourceId
+              title
+              variants(first: 1) {
+                edges {
+                  node {
+                    id
+                    legacyResourceId
+                    sku
+                  }
+                }
+              }
+            }
+            quantity
           }
         }
       }

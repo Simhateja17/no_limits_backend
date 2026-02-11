@@ -791,6 +791,10 @@ export const WEBHOOK_TOPIC_MAP: Record<string, string> = {
   'fulfillment_orders/placed_on_hold': 'FULFILLMENT_ORDERS_PLACED_ON_HOLD',
   'fulfillment_orders/rescheduled': 'FULFILLMENT_ORDERS_RESCHEDULED',
   'fulfillment_orders/scheduled_fulfillment_order_ready': 'FULFILLMENT_ORDERS_SCHEDULED_FULFILLMENT_ORDER_READY',
+
+  // Product Feeds webhooks (bundle detection)
+  'product_feeds/incremental_sync': 'PRODUCT_FEEDS_INCREMENTAL_SYNC',
+  'product_feeds/full_sync': 'PRODUCT_FEEDS_FULL_SYNC',
 };
 
 /**

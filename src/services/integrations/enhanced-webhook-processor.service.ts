@@ -220,6 +220,13 @@ interface WooCommerceProductPayload {
   images?: Array<{ id: number; src: string; alt?: string }>;
   attributes?: Array<{ id: number; name: string; options: string[] }>;
   meta_data?: Array<{ id: number; key: string; value: string }>;
+  type?: string;  // "simple" | "variable" | "bundle"
+  bundled_items?: Array<{
+    product_id: number;
+    quantity_default?: number;
+    quantity_min?: number;
+    quantity_max?: number;
+  }>;
 }
 
 interface WooCommerceOrderPayload {
@@ -274,6 +281,58 @@ interface WooCommerceOrderPayload {
     total: string;
     price?: number;
   }>;
+}
+
+// Shopify Product Feeds webhook payload (for bundle detection)
+interface ShopifyProductFeedPayload {
+  metadata: {
+    action: 'CREATE' | 'UPDATE' | 'REMOVE' | 'DELETE';
+    type: 'INCREMENTAL' | 'FULL';
+    resource: 'PRODUCT';
+    truncatedFields: string[];
+    occurred_at: string;
+  };
+  productFeed: {
+    id: string;  // e.g., "gid://shopify/ProductFeed/12345"
+    shop_id: string;
+    country: string;
+    language: string;
+  };
+  product: {
+    id: string;  // e.g., "gid://shopify/Product/123"
+    title: string;
+    description?: string;
+    onlineStoreUrl?: string;
+    createdAt: string;
+    updatedAt: string;
+    isPublished: boolean;
+    publishedAt?: string;
+    productType?: string;
+    vendor?: string;
+    handle: string;
+    isBundle: boolean;  // KEY FIELD for bundle detection
+    images?: {
+      edges: Array<{
+        node: {
+          id: string;
+          url: string;
+          height: number;
+          width: number;
+        };
+      }>;
+    };
+    variants?: {
+      edges: Array<{
+        node: {
+          id: string;
+          title: string;
+          price: string;
+          sku?: string;
+          barcode?: string;
+        };
+      }>;
+    };
+  };
 }
 
 // ============= SERVICE =============
@@ -452,6 +511,8 @@ export class EnhancedWebhookProcessor {
         return this.handleShopifyRefund(channelId, clientId, action, payload as unknown as ShopifyRefundPayload, webhookId);
       case 'fulfillment_orders':
         return this.handleShopifyFulfillmentOrder(channelId, clientId, action, payload as unknown as ShopifyFulfillmentOrderPayload, webhookId);
+      case 'product_feeds':
+        return this.handleShopifyProductFeed(channelId, clientId, action, payload as unknown as ShopifyProductFeedPayload, webhookId);
       default:
         return {
           success: false,
@@ -521,6 +582,9 @@ export class EnhancedWebhookProcessor {
       isActive: payload.status === 'active',
       status: payload.status,
       rawData: payload as unknown as Record<string, unknown>,
+
+      // Note: Shopify REST webhooks don't include bundleComponents.
+      // Bundles are detected during GraphQL sync cycles (pullProductsFromChannel).
     };
 
     // Process through ProductSyncService
@@ -544,6 +608,100 @@ export class EnhancedWebhookProcessor {
         conflicts: result.conflicts,
       },
       syncQueuedTo: result.syncedPlatforms,
+    };
+  }
+
+  /**
+   * Handle Shopify Product Feeds webhook (incremental_sync or full_sync)
+   * These webhooks provide the isBundle flag for immediate bundle detection
+   */
+  private async handleShopifyProductFeed(
+    channelId: string,
+    clientId: string,
+    action: string,  // "incremental_sync" or "full_sync"
+    payload: ShopifyProductFeedPayload,
+    webhookId: string
+  ): Promise<WebhookProcessResult> {
+    const productId = payload.product.id;
+    const numericId = productId.split('/').pop() || '';
+
+    this.logger.info({
+      event: 'product_feed_webhook',
+      action,
+      productId,
+      isBundle: payload.product.isBundle,
+      metadata: payload.metadata,
+    });
+
+    // Extract variant data (use first variant if multiple)
+    const variants = payload.product.variants?.edges.map(e => e.node) || [];
+    const firstVariant = variants[0];
+
+    // If this is a bundle product, mark it as bundle
+    // Component details will be fetched later via GraphQL sync
+    let bundleComponents: Array<{ externalId?: string; sku?: string; quantity: number }> | undefined;
+
+    if (payload.product.isBundle) {
+      this.logger.info({
+        event: 'bundle_detected_via_feed',
+        productId,
+        note: 'Bundle marked - components will be fetched on next sync cycle',
+      });
+    }
+
+    // Transform to our standard format
+    const productData: IncomingProductData = {
+      externalId: numericId,
+      channelId,
+      name: payload.product.title,
+      description: payload.product.description,
+      sku: firstVariant?.sku,
+      gtin: firstVariant?.barcode,
+      price: firstVariant?.price ? parseFloat(firstVariant.price) : undefined,
+      isActive: payload.product.isPublished,
+
+      // Mark as bundle based on Product Feeds flag
+      // bundleComponents will be fetched separately via GraphQL if needed
+      isBundle: payload.product.isBundle,
+      bundleComponents,
+    };
+
+    // Handle different metadata actions
+    if (payload.metadata.action === 'DELETE' || payload.metadata.action === 'REMOVE') {
+      const result = await this.productSyncService.processProductDeletion(
+        'shopify',
+        clientId,
+        channelId,
+        numericId
+      );
+
+      return {
+        success: result.success,
+        action: result.action === 'updated' ? 'updated' : result.action === 'deleted' ? 'deleted' : 'skipped',
+        entityType: 'product',
+        localId: result.productId,
+        externalId: numericId,
+        error: result.error,
+        details: result.details,
+      };
+    }
+
+    // Process create/update through ProductSyncService
+    const result = await this.productSyncService.processIncomingProduct(
+      'shopify',
+      clientId,
+      channelId,
+      productData,
+      webhookId
+    );
+
+    return {
+      success: result.success,
+      action: result.action,
+      entityType: 'product',
+      localId: result.productId,
+      externalId: numericId,
+      error: result.error,
     };
   }
 
@@ -1268,6 +1426,14 @@ export class EnhancedWebhookProcessor {
       collections: payload.categories?.map(c => String(c.id)),
       isActive: payload.status === 'publish',
       status: payload.status,
+
+      // Bundle detection
+      isBundle: payload.type === 'bundle' && (payload.bundled_items?.length ?? 0) > 0,
+      bundleComponents: payload.type === 'bundle' ? payload.bundled_items?.map(bi => ({
+        externalId: String(bi.product_id),
+        quantity: bi.quantity_default ?? 1,
+      })) : undefined,
+
       rawData: payload as unknown as Record<string, unknown>,
     };
 

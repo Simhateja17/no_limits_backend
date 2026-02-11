@@ -588,6 +588,7 @@ model Product {
   syncQueue       ProductSyncQueue[]
   bundleItems       BundleItem[]  @relation("BundleParent")
   bundledInProducts BundleItem[]  @relation("BundleChild")
+  pendingBundleLinks  PendingBundleLink[] @relation("PendingBundleParent")
 
   @@unique([clientId, sku])
   @@index([syncStatus])
@@ -609,6 +610,35 @@ model BundleItem {
   @@unique([parentProductId, childProductId])
   @@index([childProductId])
   @@map("bundle_items")
+}
+
+// Pending Bundle Link - Deferred bundle linking when child products don't exist yet
+model PendingBundleLink {
+  id                  String   @id @default(cuid())
+
+  // Parent bundle product
+  parentProductId     String   @map("parent_product_id")
+  parentProduct       Product  @relation("PendingBundleParent", fields: [parentProductId], references: [id], onDelete: Cascade)
+
+  // Child identification (may not exist yet)
+  childExternalId     String?  // External platform ID (e.g., Shopify variant ID)
+  childSku            String?  // SKU fallback
+
+  // Resolved child (once found)
+  childProductId      String?  @map("child_product_id")
+
+  quantity            Int      @default(1)
+  channelId           String   @map("channel_id")
+  status              String   @default("pending") // "pending" | "resolved" | "failed"
+
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@index([childSku])
+  @@index([childExternalId])
+  @@index([parentProductId])
+  @@index([status])
+  @@map("pending_bundle_links")
 }
 
 // Product Sync Log - Audit trail for all sync operations

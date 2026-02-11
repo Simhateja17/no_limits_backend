@@ -106,6 +106,13 @@ export interface ShopifyProduct {
   tags: string;
   variants: ShopifyVariant[];
   images: ShopifyProductImage[];
+  bundleComponents?: Array<{
+    productId: number;
+    variantId?: number;
+    sku?: string;
+    title: string;
+    quantity: number;
+  }>;
 }
 
 export interface ShopifyVariant {
@@ -221,6 +228,13 @@ export interface WooCommerceProduct {
   images: WooCommerceProductImage[];
   categories: WooCommerceCategory[];
   variations: number[];
+  bundled_items?: Array<{
+    product_id: number;
+    quantity_default: number;
+    quantity_min: number;
+    quantity_max: number;
+  }>;
+  bundled_by?: number[];
 }
 
 export interface WooCommerceDimensions {

@@ -155,6 +155,19 @@ interface GraphQLProduct {
   tags?: string[];
   variants?: Connection<GraphQLProductVariant> | { edges: Array<{ node: GraphQLProductVariant }> };
   images?: Connection<GraphQLProductImage> | { edges: Array<{ node: GraphQLProductImage }> };
+  bundleComponents?: Connection<{
+    componentProduct: {
+      id: string;
+      legacyResourceId?: string;
+      title: string;
+      variants?: Connection<{
+        id: string;
+        legacyResourceId?: string;
+        sku?: string;
+      }>;
+    };
+    quantity: number;
+  }>;
 }
 
 // ============= Mapper Functions =============
@@ -383,6 +396,8 @@ export function mapProduct(product: GraphQLProduct): ShopifyProduct {
   const variants = getNodes(product.variants);
   const images = getNodes(product.images);
 
+  const bundleComponents = getNodes(product.bundleComponents || undefined);
+
   return {
     id: productId,
     title: product.title,
@@ -396,6 +411,19 @@ export function mapProduct(product: GraphQLProduct): ShopifyProduct {
     tags: Array.isArray(product.tags) ? product.tags.join(', ') : (product.tags || ''),
     variants: variants.map(v => mapVariant(v, productId)),
     images: images.map((img, idx) => mapProductImage(img, productId, idx)),
+    bundleComponents: bundleComponents.map(bc => {
+      const componentVariants = getNodes(bc.componentProduct.variants || undefined);
+      const firstVariant = componentVariants[0];
+      return {
+        productId: getNumericId(bc.componentProduct.id, bc.componentProduct.legacyResourceId),
+        variantId: firstVariant
+          ? getNumericId(firstVariant.id, firstVariant.legacyResourceId)
+          : undefined,
+        sku: firstVariant?.sku,
+        title: bc.componentProduct.title,
+        quantity: bc.quantity,
+      };
+    }),
   };
 }
 

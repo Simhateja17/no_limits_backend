@@ -482,15 +482,62 @@ export class WebhookProcessorService {
 
       if (action === 'updated' && existingOrder) {
         const status = this.mapShopifyOrderStatus(payload.fulfillment_status, payload.financial_status);
+        const newPaymentStatus = payload.financial_status || null;
+        const oldPaymentStatus = existingOrder.paymentStatus;
+
+        // Shopify paid statuses
+        const shopifyPaidStatuses = ['paid', 'authorized', 'partially_paid'];
+        const wasUnpaid = !oldPaymentStatus || !shopifyPaidStatuses.includes(oldPaymentStatus.toLowerCase());
+        const isNowPaid = newPaymentStatus && shopifyPaidStatuses.includes(newPaymentStatus.toLowerCase());
+        const paymentJustConfirmed = wasUnpaid && isNowPaid;
+
+        const updateData: Record<string, unknown> = {
+          status,
+          paymentStatus: newPaymentStatus,
+          notes: payload.note || existingOrder.notes,
+          updatedAt: new Date(),
+        };
+
+        const shouldReleaseHold = paymentJustConfirmed
+          && existingOrder.isOnHold
+          && existingOrder.holdReason === 'AWAITING_PAYMENT'
+          && !existingOrder.paymentHoldOverride;
+
+        if (shouldReleaseHold) {
+          updateData.isOnHold = false;
+          updateData.holdReason = null;
+          updateData.holdNotes = null;
+          updateData.holdReleasedAt = new Date();
+          updateData.holdReleasedBy = 'SYSTEM';
+          updateData.ffnSyncError = null;
+          updateData.lastOperationalUpdateBy = 'SHOPIFY';
+          updateData.lastOperationalUpdateAt = new Date();
+        }
 
         await this.prisma.order.update({
           where: { id: existingOrder.id },
-          data: {
-            status,
-            notes: payload.note || existingOrder.notes,
-            updatedAt: new Date(),
-          },
+          data: updateData,
         });
+
+        if (shouldReleaseHold) {
+          await this.prisma.orderSyncLog.create({
+            data: {
+              orderId: existingOrder.id,
+              action: 'payment_confirmed',
+              origin: 'SHOPIFY',
+              targetPlatform: 'nolimits',
+              success: true,
+              changedFields: ['isOnHold', 'holdReason', 'holdReleasedAt', 'holdReleasedBy', 'paymentStatus'],
+              previousState: { paymentStatus: oldPaymentStatus, isOnHold: true, holdReason: 'AWAITING_PAYMENT' },
+              newState: { paymentStatus: newPaymentStatus, isOnHold: false, holdReason: null },
+            },
+          });
+
+          if (!existingOrder.jtlOutboundId) {
+            await this.queueJTLOrderSync(existingOrder.id, 'SHOPIFY');
+            console.log(`[WebhookProcessor] Shopify order ${existingOrder.id} released from payment hold and queued for FFN sync`);
+          }
+        }
 
         return {
           success: true,
@@ -498,7 +545,7 @@ export class WebhookProcessorService {
           entityType: 'order',
           localId: existingOrder.id,
           externalId,
-          details: { status },
+          details: { status, paymentStatus: newPaymentStatus, holdReleased: shouldReleaseHold },
         };
       }
 
@@ -948,15 +995,66 @@ export class WebhookProcessorService {
 
       if (action === 'updated' && existingOrder) {
         const status = this.mapWooCommerceOrderStatus(payload.status);
+        const newPaymentStatus = this.mapWooCommercePaymentStatus(payload.status);
+        const oldPaymentStatus = existingOrder.paymentStatus;
+
+        // Check if payment was just confirmed
+        const paidStatuses = ['paid'];
+        const wasUnpaid = !oldPaymentStatus || !paidStatuses.includes(oldPaymentStatus.toLowerCase());
+        const isNowPaid = newPaymentStatus === 'paid';
+        const paymentJustConfirmed = wasUnpaid && isNowPaid;
+
+        // Build update data — always update status + paymentStatus
+        const updateData: Record<string, unknown> = {
+          status,
+          paymentStatus: newPaymentStatus,
+          notes: payload.customer_note || existingOrder.notes,
+          updatedAt: new Date(),
+        };
+
+        // Release payment hold if payment just confirmed and order is on AWAITING_PAYMENT hold
+        const shouldReleaseHold = paymentJustConfirmed
+          && existingOrder.isOnHold
+          && existingOrder.holdReason === 'AWAITING_PAYMENT'
+          && !existingOrder.paymentHoldOverride;
+
+        if (shouldReleaseHold) {
+          updateData.isOnHold = false;
+          updateData.holdReason = null;
+          updateData.holdNotes = null;
+          updateData.holdReleasedAt = new Date();
+          updateData.holdReleasedBy = 'SYSTEM';
+          updateData.ffnSyncError = null;
+          updateData.lastOperationalUpdateBy = 'WOOCOMMERCE';
+          updateData.lastOperationalUpdateAt = new Date();
+        }
 
         await this.prisma.order.update({
           where: { id: existingOrder.id },
-          data: {
-            status,
-            notes: payload.customer_note || existingOrder.notes,
-            updatedAt: new Date(),
-          },
+          data: updateData,
         });
+
+        // Audit log + FFN sync queue when hold is released
+        if (shouldReleaseHold) {
+          await this.prisma.orderSyncLog.create({
+            data: {
+              orderId: existingOrder.id,
+              action: 'payment_confirmed',
+              origin: 'WOOCOMMERCE',
+              targetPlatform: 'nolimits',
+              success: true,
+              changedFields: ['isOnHold', 'holdReason', 'holdReleasedAt', 'holdReleasedBy', 'paymentStatus'],
+              previousState: { paymentStatus: oldPaymentStatus, isOnHold: true, holdReason: 'AWAITING_PAYMENT' },
+              newState: { paymentStatus: newPaymentStatus, isOnHold: false, holdReason: null },
+            },
+          });
+
+          // Queue for FFN sync if not already synced
+          if (!existingOrder.jtlOutboundId) {
+            await this.queueJTLOrderSync(existingOrder.id, 'WOOCOMMERCE');
+            console.log(`[WebhookProcessor] WooCommerce order ${existingOrder.id} released from payment hold and queued for FFN sync`);
+          }
+        }
 
         return {
           success: true,
@@ -964,7 +1062,7 @@ export class WebhookProcessorService {
           entityType: 'order',
           localId: existingOrder.id,
           externalId,
-          details: { status },
+          details: { status, paymentStatus: newPaymentStatus, holdReleased: shouldReleaseHold },
         };
       }
 

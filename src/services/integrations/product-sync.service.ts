@@ -161,7 +161,15 @@ export interface IncomingProductData {
   // Status
   isActive?: boolean;
   status?: string;
-  
+
+  // Bundle detection
+  isBundle?: boolean;
+  bundleComponents?: Array<{
+    externalId?: string;  // Platform-specific product/variant ID
+    sku?: string;
+    quantity: number;
+  }>;
+
   // Raw platform data
   rawData?: Record<string, unknown>;
 }
@@ -395,6 +403,16 @@ export class ProductSyncService {
         success: true,
         externalId,
       });
+
+      // 5b. Handle bundle linking (if bundle data provided)
+      if (data.isBundle && data.bundleComponents?.length) {
+        await this.processBundleLinking(product.id, clientId, channelId, data);
+      }
+
+      // 5c. Check if this product resolves any pending bundle links
+      await this.resolveAnyPendingBundleLinks(
+        product.id, clientId, data.sku, data.externalId, channelId
+      );
 
       // 6. Queue sync to other platforms
       this.logger.debug({
@@ -2488,5 +2506,176 @@ export class ProductSyncService {
       error: statusMap.ERROR || 0,
       lastSyncAt: lastSync?.lastSyncedAt || null,
     };
+  }
+
+  /**
+   * Process bundle linking - create BundleItems or PendingBundleLinks
+   */
+  private async processBundleLinking(
+    productId: string,
+    clientId: string,
+    channelId: string,
+    data: IncomingProductData
+  ): Promise<void> {
+    if (!data.isBundle || !data.bundleComponents?.length) return;
+
+    // Mark product as bundle
+    await this.prisma.product.update({
+      where: { id: productId },
+      data: { isBundle: true },
+    });
+
+    const resolvedChildIds: string[] = [];
+
+    for (const comp of data.bundleComponents) {
+      // Try to find the child product
+      const child = await this.findChildProduct(clientId, channelId, comp.externalId, comp.sku);
+
+      if (child) {
+        // Directly create BundleItem
+        await this.prisma.bundleItem.upsert({
+          where: {
+            parentProductId_childProductId: {
+              parentProductId: productId,
+              childProductId: child.id,
+            },
+          },
+          create: {
+            parentProductId: productId,
+            childProductId: child.id,
+            quantity: comp.quantity,
+          },
+          update: { quantity: comp.quantity },
+        });
+        resolvedChildIds.push(child.id);
+      } else {
+        // Check if pending link already exists
+        const existingPending = await this.prisma.pendingBundleLink.findFirst({
+          where: {
+            parentProductId: productId,
+            OR: [
+              comp.externalId ? { childExternalId: comp.externalId } : null,
+              comp.sku ? { childSku: comp.sku } : null,
+            ].filter(Boolean) as any[],
+          },
+        });
+
+        if (!existingPending) {
+          // Create PendingBundleLink for deferred resolution
+          await this.prisma.pendingBundleLink.create({
+            data: {
+              parentProductId: productId,
+              childExternalId: comp.externalId || null,
+              childSku: comp.sku || null,
+              quantity: comp.quantity,
+              channelId,
+              status: 'pending',
+            },
+          });
+        } else {
+          // Update quantity if changed
+          await this.prisma.pendingBundleLink.update({
+            where: { id: existingPending.id },
+            data: { quantity: comp.quantity, status: 'pending' },
+          });
+        }
+      }
+    }
+
+    // Clean up BundleItems for components no longer in the bundle
+    if (resolvedChildIds.length > 0) {
+      await this.prisma.bundleItem.deleteMany({
+        where: {
+          parentProductId: productId,
+          childProductId: { notIn: resolvedChildIds },
+        },
+      });
+    }
+  }
+
+  /**
+   * Find child product by external ID or SKU
+   */
+  private async findChildProduct(
+    clientId: string,
+    channelId: string,
+    externalId?: string,
+    sku?: string
+  ): Promise<{ id: string } | null> {
+    if (externalId) {
+      const byExternal = await this.prisma.product.findFirst({
+        where: {
+          clientId,
+          channels: { some: { channelId, externalProductId: externalId } },
+        },
+        select: { id: true },
+      });
+      if (byExternal) return byExternal;
+    }
+
+    if (sku) {
+      const bySku = await this.prisma.product.findFirst({
+        where: { clientId, sku },
+        select: { id: true },
+      });
+      if (bySku) return bySku;
+    }
+
+    return null;
+  }
+
+  /**
+   * Resolve any pending bundle links where this product could be a child
+   */
+  private async resolveAnyPendingBundleLinks(
+    productId: string,
+    clientId: string,
+    sku?: string,
+    externalId?: string,
+    channelId?: string
+  ): Promise<void> {
+    // Find pending links where this product could be a child
+    const conditions: any[] = [];
+    if (sku) conditions.push({ childSku: sku });
+    if (externalId) conditions.push({ childExternalId: externalId });
+    if (conditions.length === 0) return;
+
+    const pendingLinks = await this.prisma.pendingBundleLink.findMany({
+      where: { status: 'pending', OR: conditions },
+      include: { parentProduct: { select: { id: true, clientId: true } } },
+    });
+
+    for (const link of pendingLinks) {
+      if (link.parentProduct.clientId !== clientId) continue;
+
+      // Create the BundleItem
+      await this.prisma.bundleItem.upsert({
+        where: {
+          parentProductId_childProductId: {
+            parentProductId: link.parentProductId,
+            childProductId: productId,
+          },
+        },
+        create: {
+          parentProductId: link.parentProductId,
+          childProductId: productId,
+          quantity: link.quantity,
+        },
+        update: { quantity: link.quantity },
+      });
+
+      // Mark link as resolved
+      await this.prisma.pendingBundleLink.update({
+        where: { id: link.id },
+        data: { status: 'resolved', childProductId: productId },
+      });
+
+      this.logger.info({
+        event: 'pending_bundle_resolved',
+        parentProductId: link.parentProductId,
+        childProductId: productId,
+        childSku: sku,
+      });
+    }
   }
 }

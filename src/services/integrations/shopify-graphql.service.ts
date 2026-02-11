@@ -1968,6 +1968,8 @@ export class ShopifyGraphQLService {
       'products/delete',
       'refunds/create',
       'inventory_levels/update',
+      'product_feeds/incremental_sync',
+      'product_feeds/full_sync',
     ];
 
     const results: SyncItemResult[] = [];

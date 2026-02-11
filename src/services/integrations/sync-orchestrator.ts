@@ -99,6 +99,12 @@ interface ProductSyncData {
   gtin?: string;
   weight?: number;
   imageUrl?: string;
+  isBundle?: boolean;
+  bundleComponents?: Array<{
+    externalId?: string;
+    sku?: string;
+    quantity: number;
+  }>;
 }
 
 interface OrderSyncData {
@@ -316,8 +322,17 @@ export class SyncOrchestrator {
       }
 
       for (const product of shopifyProducts) {
+        // Detect bundle from bundleComponents
+        const isBundle = product.bundleComponents && product.bundleComponents.length > 0;
+        const bundleComponents = isBundle ? product.bundleComponents!.map((bc: any) => ({
+          externalId: bc.variantId ? String(bc.variantId) : String(bc.productId),
+          sku: bc.sku,
+          quantity: bc.quantity,
+        })) : undefined;
+
         // Process each variant as a separate product
-        for (const variant of product.variants) {
+        for (let i = 0; i < product.variants.length; i++) {
+          const variant = product.variants[i];
           products.push({
             localProductId: '', // Will be set after DB insert
             externalProductId: String(variant.id),
@@ -326,6 +341,9 @@ export class SyncOrchestrator {
             gtin: variant.barcode || undefined,
             weight: variant.weight,
             imageUrl: product.images[0]?.src,
+            // Only first variant gets bundle data
+            isBundle: isBundle && i === 0,
+            bundleComponents: isBundle && i === 0 ? bundleComponents : undefined,
           });
         }
       }
@@ -345,6 +363,13 @@ export class SyncOrchestrator {
       }
 
       for (const product of wooProducts) {
+        // Detect bundle from type and bundled_items
+        const isBundle = product.type === 'bundle' && product.bundled_items && product.bundled_items.length > 0;
+        const bundleComponents = isBundle ? product.bundled_items!.map((bi: any) => ({
+          externalId: String(bi.product_id),
+          quantity: bi.quantity_default ?? 1,
+        })) : undefined;
+
         products.push({
           localProductId: '',
           externalProductId: String(product.id),
@@ -353,6 +378,8 @@ export class SyncOrchestrator {
           gtin: undefined, // WooCommerce doesn't have GTIN by default
           weight: product.weight ? parseFloat(product.weight) : undefined,
           imageUrl: product.images[0]?.src,
+          isBundle,
+          bundleComponents,
         });
 
         // Handle variable products
@@ -366,6 +393,7 @@ export class SyncOrchestrator {
               name: `${product.name} - ${variation.name}`,
               weight: variation.weight ? parseFloat(variation.weight) : undefined,
               imageUrl: variation.images?.[0]?.src || product.images[0]?.src,
+              // Variations don't inherit bundle status
             });
           }
         }
@@ -440,6 +468,12 @@ export class SyncOrchestrator {
         },
       });
 
+      // Handle bundle linking
+      await this.handleBundleLinking(existingProduct.id, channel.clientId, productData);
+
+      // Check if this product resolves pending links
+      await this.resolvePendingLinks(existingProduct.id, channel.clientId, productData.sku, productData.externalProductId);
+
       return { ...productData, localProductId: existingProduct.id };
     } else {
       // Create new product (channel was already fetched above)
@@ -461,7 +495,162 @@ export class SyncOrchestrator {
         },
       });
 
+      // Handle bundle linking
+      await this.handleBundleLinking(newProduct.id, channel.clientId, productData);
+
+      // Check if this product resolves pending links
+      await this.resolvePendingLinks(newProduct.id, channel.clientId, productData.sku, productData.externalProductId);
+
       return { ...productData, localProductId: newProduct.id };
+    }
+  }
+
+  /**
+   * Handle bundle linking - create BundleItems or PendingBundleLinks
+   */
+  private async handleBundleLinking(
+    productId: string,
+    clientId: string,
+    productData: ProductSyncData
+  ): Promise<void> {
+    if (!productData.isBundle || !productData.bundleComponents?.length) return;
+
+    // Mark product as bundle
+    await this.prisma.product.update({
+      where: { id: productId },
+      data: { isBundle: true },
+    });
+
+    const resolvedChildIds: string[] = [];
+
+    for (const comp of productData.bundleComponents) {
+      const child = await this.findChildInDB(clientId, comp.externalId, comp.sku);
+      if (child) {
+        await this.prisma.bundleItem.upsert({
+          where: {
+            parentProductId_childProductId: {
+              parentProductId: productId,
+              childProductId: child.id,
+            },
+          },
+          create: {
+            parentProductId: productId,
+            childProductId: child.id,
+            quantity: comp.quantity,
+          },
+          update: { quantity: comp.quantity },
+        });
+        resolvedChildIds.push(child.id);
+      } else {
+        // Check if pending link already exists
+        const existing = await this.prisma.pendingBundleLink.findFirst({
+          where: {
+            parentProductId: productId,
+            OR: [
+              comp.externalId ? { childExternalId: comp.externalId } : null,
+              comp.sku ? { childSku: comp.sku } : null,
+            ].filter(Boolean) as any[],
+          },
+        });
+        if (!existing) {
+          await this.prisma.pendingBundleLink.create({
+            data: {
+              parentProductId: productId,
+              childExternalId: comp.externalId || null,
+              childSku: comp.sku || null,
+              quantity: comp.quantity,
+              channelId: this.config.channelId,
+            },
+          });
+        } else {
+          await this.prisma.pendingBundleLink.update({
+            where: { id: existing.id },
+            data: { quantity: comp.quantity, status: 'pending' },
+          });
+        }
+      }
+    }
+
+    // Clean up BundleItems for components no longer in the bundle
+    if (resolvedChildIds.length > 0) {
+      await this.prisma.bundleItem.deleteMany({
+        where: {
+          parentProductId: productId,
+          childProductId: { notIn: resolvedChildIds },
+        },
+      });
+    }
+  }
+
+  /**
+   * Find child product in database by external ID or SKU
+   */
+  private async findChildInDB(clientId: string, externalId?: string, sku?: string) {
+    if (externalId) {
+      const result = await this.prisma.product.findFirst({
+        where: {
+          clientId,
+          channels: {
+            some: {
+              channelId: this.config.channelId,
+              externalProductId: externalId,
+            },
+          },
+        },
+        select: { id: true },
+      });
+      if (result) return result;
+    }
+    if (sku) {
+      return this.prisma.product.findFirst({
+        where: { clientId, sku },
+        select: { id: true },
+      });
+    }
+    return null;
+  }
+
+  /**
+   * Resolve pending bundle links where this product could be a child
+   */
+  private async resolvePendingLinks(
+    productId: string,
+    clientId: string,
+    sku: string,
+    externalId: string
+  ) {
+    const conditions: any[] = [];
+    if (sku) conditions.push({ childSku: sku });
+    if (externalId) conditions.push({ childExternalId: externalId });
+    if (!conditions.length) return;
+
+    const pending = await this.prisma.pendingBundleLink.findMany({
+      where: { status: 'pending', OR: conditions },
+      include: { parentProduct: { select: { id: true, clientId: true } } },
+    });
+
+    for (const link of pending) {
+      if (link.parentProduct.clientId !== clientId) continue;
+      await this.prisma.bundleItem.upsert({
+        where: {
+          parentProductId_childProductId: {
+            parentProductId: link.parentProductId,
+            childProductId: productId,
+          },
+        },
+        create: {
+          parentProductId: link.parentProductId,
+          childProductId: productId,
+          quantity: link.quantity,
+        },
+        update: { quantity: link.quantity },
+      });
+      await this.prisma.pendingBundleLink.update({
+        where: { id: link.id },
+        data: { status: 'resolved', childProductId: productId },
+      });
+
+      console.log(`[Bundle] Resolved pending link: parent=${link.parentProductId} child=${productId}`);
     }
   }
 
