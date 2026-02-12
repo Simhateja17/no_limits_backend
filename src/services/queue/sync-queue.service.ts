@@ -160,15 +160,22 @@ export class SyncQueueService {
     }
 
     try {
-      const jobId = await this.boss.send(queueName, data as object, {
-        priority: options?.priority,
+      // Build options object conditionally to avoid passing undefined values to pg-boss
+      // pg-boss validates that optional fields (priority, singletonKey, startAfter) MUST be
+      // of the correct type if present. Passing undefined causes validation errors.
+      const jobOptions: any = {
         retryLimit: options?.retryLimit ?? 3,
         retryDelay: options?.retryDelay ?? 60,
         retryBackoff: options?.retryBackoff ?? true,
         expireInSeconds: options?.expireInSeconds ?? 3600,
-        singletonKey: options?.singletonKey,
-        startAfter: options?.startAfter,
-      });
+      };
+
+      // Only include optional fields if they have defined values
+      if (options?.priority !== undefined) jobOptions.priority = options.priority;
+      if (options?.singletonKey) jobOptions.singletonKey = options.singletonKey;
+      if (options?.startAfter) jobOptions.startAfter = options.startAfter;
+
+      const jobId = await this.boss.send(queueName, data as object, jobOptions);
 
       console.log(`[Queue] Enqueued job ${jobId} to ${queueName}`);
       return jobId;
