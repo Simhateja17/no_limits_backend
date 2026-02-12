@@ -1988,9 +1988,9 @@ export class SyncOrchestrator {
               data: updateData,
             });
 
-            // Update e-commerce platform with fulfillment status if shipped
+            // Queue fulfillment sync to e-commerce platform (with retries)
             if (newStatus === 'SHIPPED') {
-              await this.updateChannelOrderStatus(order.id, 'fulfilled');
+              await this.queueFulfillmentToCommerce(order.id, order.orderId || order.id);
             }
 
             results.push({
@@ -2094,6 +2094,51 @@ export class SyncOrchestrator {
         itemsProcessed,
         itemsFailed,
       };
+    }
+  }
+
+  /**
+   * Queue a fulfillment sync to commerce platform via pg-boss
+   * Uses ORDER_SYNC_TO_COMMERCE queue with retries and exponential backoff.
+   * Falls back to direct updateChannelOrderStatus() if queue is unavailable.
+   */
+  private async queueFulfillmentToCommerce(orderId: string, orderIdentifier: string): Promise<void> {
+    try {
+      const queue = getQueue();
+      const jobId = await queue.enqueue<OrderSyncJobData>(
+        QUEUE_NAMES.ORDER_SYNC_TO_COMMERCE,
+        {
+          orderId,
+          origin: 'nolimits',
+          operation: 'fulfill',
+        },
+        {
+          singletonKey: `commerce-fulfill-${orderId}`,
+          retryLimit: 5,
+          retryDelay: 30,
+          retryBackoff: true,
+          expireInSeconds: 7200,
+        }
+      );
+
+      if (jobId) {
+        console.log(`[SyncOrchestrator] Queued fulfillment sync for order ${orderIdentifier} (job: ${jobId})`);
+      } else {
+        // singletonKey duplicate — job already exists, which is fine
+        console.log(`[SyncOrchestrator] Fulfillment sync already queued for order ${orderIdentifier}`);
+      }
+    } catch (error: any) {
+      // Queue unavailable — fall back to direct call (graceful degradation)
+      console.warn(`[SyncOrchestrator] Queue unavailable for order ${orderIdentifier}, falling back to direct call: ${error.message}`);
+      try {
+        await this.updateChannelOrderStatus(orderId, 'fulfilled');
+      } catch (directError: any) {
+        console.error(`[SyncOrchestrator] Direct fulfillment also failed for order ${orderIdentifier}: ${directError.message}`);
+        await this.prisma.order.update({
+          where: { id: orderId },
+          data: { commerceSyncError: directError.message },
+        });
+      }
     }
   }
 
@@ -2728,22 +2773,15 @@ export class SyncOrchestrator {
 
             result.statusesUpdated++;
 
-            // Push to channel if order is shipped/delivered
+            // Queue fulfillment sync to channel (with retries via pg-boss)
             if (newStatus === 'SHIPPED' || newStatus === 'DELIVERED') {
               try {
-                // Update Shopify fulfillment with tracking info
-                if (updateData.trackingNumber) {
-                  console.log(`[Shopify] Triggering fulfillment update for order ${order.orderNumber} with tracking ${updateData.trackingNumber}`);
-                  await this.updateShopifyFulfillmentForOrder(order.id, updateData.trackingNumber, updateData.trackingUrl);
-                } else {
-                  console.log(`[Shopify] Skipping fulfillment update for order ${order.orderNumber} - no tracking number available`);
-                }
-                await this.updateChannelOrderStatus(order.id, newStatus);
+                await this.queueFulfillmentToCommerce(order.id, order.orderNumber || order.id);
                 result.channelsPushed++;
-                console.log(`[SyncOrchestrator] Pushed status to channel for order ${order.orderNumber}`);
+                console.log(`[SyncOrchestrator] Queued fulfillment sync for order ${order.orderNumber}`);
               } catch (channelError: any) {
-                console.error(`[SyncOrchestrator] Failed to push to channel for order ${order.orderNumber}:`, channelError.message);
-                result.errors.push(`Order ${order.orderNumber}: Failed to push to channel - ${channelError.message}`);
+                console.error(`[SyncOrchestrator] Failed to queue fulfillment for order ${order.orderNumber}:`, channelError.message);
+                result.errors.push(`Order ${order.orderNumber}: Failed to queue fulfillment - ${channelError.message}`);
               }
             }
           }

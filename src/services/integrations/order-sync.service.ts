@@ -1162,6 +1162,9 @@ export class OrderSyncService {
         where: { id: order.id },
         data: { commerceSyncError: error.message },
       });
+
+      // Re-throw so the queue worker sees the failure and triggers pg-boss retry
+      throw error;
     }
   }
 

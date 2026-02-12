@@ -12,6 +12,7 @@ import { JTLService } from './jtl.service.js';
 import { StockSyncService } from './stock-sync.service.js';
 import { Logger } from '../../utils/logger.js';
 import { generateJobId } from '../../utils/job-id.js';
+import { getQueue, QUEUE_NAMES, OrderSyncJobData } from '../queue/sync-queue.service.js';
 
 interface SchedulerConfig {
   /**
@@ -109,6 +110,7 @@ export class SyncScheduler {
   private tokenRefreshTimer?: NodeJS.Timeout;
   private stockSyncTimer?: NodeJS.Timeout;
   private inboundPollTimer?: NodeJS.Timeout;
+  private commerceReconcileTimer?: NodeJS.Timeout;
   private stockSyncService: StockSyncService;
   private isRunning = false;
   private logger = new Logger('SyncScheduler');
@@ -151,6 +153,7 @@ export class SyncScheduler {
     this.startTokenRefreshTimer();
     this.startStockSyncTimer();
     this.startInboundPollTimer();
+    this.startCommerceReconcileTimer();
 
     console.log('Sync scheduler started successfully');
     console.log(`- Incremental sync: every ${this.config.incrementalSyncIntervalMinutes} minutes`);
@@ -159,6 +162,7 @@ export class SyncScheduler {
     console.log(`- Token refresh: every ${this.config.tokenRefreshIntervalHours} hours`);
     console.log(`- Stock sync (safety net): every ${this.config.stockSyncIntervalMinutes} minutes`);
     console.log(`- Inbound poll (stock trigger): every ${this.config.inboundPollIntervalMinutes} minutes`);
+    console.log(`- Commerce reconcile: every 30 minutes`);
   }
 
   /**
@@ -200,6 +204,11 @@ export class SyncScheduler {
     if (this.inboundPollTimer) {
       clearInterval(this.inboundPollTimer);
       this.inboundPollTimer = undefined;
+    }
+
+    if (this.commerceReconcileTimer) {
+      clearInterval(this.commerceReconcileTimer);
+      this.commerceReconcileTimer = undefined;
     }
 
     this.isRunning = false;
@@ -321,6 +330,143 @@ export class SyncScheduler {
     this.inboundPollTimer = setInterval(() => {
       this.pollInboundsAndSyncStock();
     }, intervalMs);
+  }
+
+  /**
+   * Start commerce reconciliation timer
+   * Re-enqueues orders that are SHIPPED in DB but failed to sync to commerce platform
+   */
+  private startCommerceReconcileTimer(): void {
+    const intervalMs = 30 * 60 * 1000; // 30 minutes
+
+    // First run after 2 minute delay (let queue initialize)
+    setTimeout(() => {
+      this.reconcileFailedCommerceSyncs();
+    }, 2 * 60 * 1000);
+
+    this.commerceReconcileTimer = setInterval(() => {
+      this.reconcileFailedCommerceSyncs();
+    }, intervalMs);
+  }
+
+  /**
+   * Reconcile orders that are SHIPPED but failed to sync to commerce
+   * Catches orders where pg-boss retries were exhausted or errors occurred before this fix
+   */
+  async reconcileFailedCommerceSyncs(): Promise<void> {
+    const jobId = generateJobId('commerce-reconcile');
+    const startTime = Date.now();
+
+    this.logger.debug({
+      jobId,
+      event: 'job_started',
+      operation: 'commerceReconcile',
+      type: 'stuck_order_sweep',
+    });
+
+    try {
+      // Find orders that are shipped but never synced to commerce
+      const stuckOrders = await this.prisma.order.findMany({
+        where: {
+          fulfillmentState: 'SHIPPED',
+          commerceSyncError: { not: null },
+          lastSyncedToCommerce: null,
+          channelId: { not: null },
+        },
+        select: {
+          id: true,
+          orderId: true,
+          orderNumber: true,
+          commerceSyncError: true,
+        },
+        take: 20, // Batch limit to keep load light
+        orderBy: { updatedAt: 'asc' }, // Oldest first
+      });
+
+      if (stuckOrders.length === 0) {
+        this.logger.debug({
+          jobId,
+          event: 'job_completed',
+          operation: 'commerceReconcile',
+          duration: Date.now() - startTime,
+          stuckOrders: 0,
+        });
+        return;
+      }
+
+      this.logger.info({
+        jobId,
+        event: 'stuck_orders_found',
+        count: stuckOrders.length,
+        orders: stuckOrders.map(o => o.orderNumber || o.orderId),
+      });
+
+      let enqueued = 0;
+      let skipped = 0;
+
+      const queue = getQueue();
+
+      for (const order of stuckOrders) {
+        try {
+          const enqueuedJobId = await queue.enqueue<OrderSyncJobData>(
+            QUEUE_NAMES.ORDER_SYNC_TO_COMMERCE,
+            {
+              orderId: order.id,
+              origin: 'nolimits',
+              operation: 'fulfill',
+            },
+            {
+              singletonKey: `commerce-fulfill-${order.id}`,
+              retryLimit: 5,
+              retryDelay: 30,
+              retryBackoff: true,
+              expireInSeconds: 7200,
+              priority: -1, // Lower priority than real-time jobs
+            }
+          );
+
+          if (enqueuedJobId) {
+            enqueued++;
+            this.logger.debug({
+              jobId,
+              event: 'order_re_enqueued',
+              orderId: order.id,
+              orderNumber: order.orderNumber,
+              previousError: order.commerceSyncError,
+              pgBossJobId: enqueuedJobId,
+            });
+          } else {
+            skipped++; // singletonKey duplicate — job already active
+          }
+        } catch (enqueueError) {
+          this.logger.warn({
+            jobId,
+            event: 'order_re_enqueue_failed',
+            orderId: order.id,
+            error: enqueueError instanceof Error ? enqueueError.message : 'Unknown error',
+          });
+        }
+      }
+
+      this.logger.info({
+        jobId,
+        event: 'job_completed',
+        operation: 'commerceReconcile',
+        duration: Date.now() - startTime,
+        stuckOrders: stuckOrders.length,
+        enqueued,
+        skipped,
+      });
+    } catch (error) {
+      this.logger.error({
+        jobId,
+        event: 'job_failed',
+        operation: 'commerceReconcile',
+        duration: Date.now() - startTime,
+        error: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined,
+      });
+    }
   }
 
   /**
@@ -774,6 +920,23 @@ export class SyncScheduler {
       };
     }
 
+    // Skip channels with revoked JTL tokens until re-authorized
+    if (state.lastError === 'JTL_TOKEN_REVOKED') {
+      this.logger.debug({
+        jobId,
+        event: 'channel_sync_skipped',
+        channelId: channel.id,
+        reason: 'jtl_token_revoked'
+      });
+
+      return {
+        channelId: channel.id,
+        success: false,
+        error: 'JTL token revoked — skipping until re-authorized',
+        duration: 0,
+      };
+    }
+
     if (state.isRunning) {
       this.logger.warn({
         jobId,
@@ -857,17 +1020,31 @@ export class SyncScheduler {
       };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      state.lastError = errorMessage;
 
-      this.logger.error({
-        jobId,
-        event: 'channel_sync_failed',
-        operation: 'incrementalSync',
-        channelId: channel.id,
-        duration: Date.now() - startTime,
-        error: errorMessage,
-        stack: error instanceof Error ? error.stack : undefined
-      });
+      // Detect token revocation to prevent hammering a broken token
+      if (errorMessage.includes('refresh token is invalid') ||
+          errorMessage.includes('Token has been revoked') ||
+          errorMessage.includes('invalid_request')) {
+        state.lastError = 'JTL_TOKEN_REVOKED';
+        this.logger.warn({
+          jobId,
+          event: 'channel_disabled_token_revoked',
+          channelId: channel.id,
+          duration: Date.now() - startTime,
+          error: errorMessage
+        });
+      } else {
+        state.lastError = errorMessage;
+        this.logger.error({
+          jobId,
+          event: 'channel_sync_failed',
+          operation: 'incrementalSync',
+          channelId: channel.id,
+          duration: Date.now() - startTime,
+          error: errorMessage,
+          stack: error instanceof Error ? error.stack : undefined
+        });
+      }
 
       return {
         channelId: channel.id,

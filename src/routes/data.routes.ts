@@ -3777,4 +3777,360 @@ router.delete('/tasks/:id', async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * GET /api/data/health-status
+ * Health status dashboard for client — channels, sync counts, FFN status, recent errors
+ */
+router.get('/health-status', async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).userId;
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      include: { client: true },
+    });
+
+    if (!user || !user.client) {
+      return res.status(403).json({
+        success: false,
+        error: 'Client access required',
+      });
+    }
+
+    const clientId = user.client.id;
+    const now = new Date();
+    const twentyFourHoursAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    const thirtyMinAgo = new Date(now.getTime() - 30 * 60 * 1000);
+    const twoHoursAgo = new Date(now.getTime() - 2 * 60 * 60 * 1000);
+
+    // 1. CHANNELS
+    const channels = await prisma.channel.findMany({
+      where: { clientId },
+      select: {
+        id: true,
+        name: true,
+        type: true,
+        isActive: true,
+        syncEnabled: true,
+        lastSyncAt: true,
+        lastOrderPollAt: true,
+        lastProductPollAt: true,
+        webhookUrl: true,
+      },
+    });
+
+    // Get recent order counts per channel to detect webhook/polling activity
+    const channelOrderCounts = await Promise.all(
+      channels.map(async (ch) => ({
+        channelId: ch.id,
+        recentOrderCount: await prisma.order.count({
+          where: {
+            channelId: ch.id,
+            createdAt: { gte: twentyFourHoursAgo },
+          },
+        }),
+      }))
+    );
+
+    const channelData = channels.map((ch) => {
+      // FIX 1: Use polling timestamps (lastOrderPollAt, lastProductPollAt) instead of lastSyncAt
+      // lastSyncAt is only set during onboarding and never updated during normal operations
+      const mostRecentActivity = [ch.lastOrderPollAt, ch.lastProductPollAt]
+        .filter(Boolean)
+        .sort((a, b) => (b as Date).getTime() - (a as Date).getTime())[0];
+
+      let status: 'healthy' | 'warning' | 'error' | 'inactive' = 'error';
+      if (!ch.isActive || !ch.syncEnabled) {
+        status = 'inactive';
+      } else if (mostRecentActivity && mostRecentActivity > thirtyMinAgo) {
+        status = 'healthy';
+      } else if (mostRecentActivity && mostRecentActivity > twoHoursAgo) {
+        status = 'warning';
+      }
+      // else stays 'error' (no polling activity in >2h or never)
+
+      // FIX 2: Detect webhook activity by checking if orders arrived recently
+      // webhookUrl field is never populated, so we check functional activity instead
+      const orderCount = channelOrderCounts.find((c) => c.channelId === ch.id)?.recentOrderCount || 0;
+      const hasWebhook = orderCount > 0 || !!ch.webhookUrl;
+
+      return {
+        id: ch.id,
+        name: ch.name,
+        type: ch.type,
+        isActive: ch.isActive,
+        syncEnabled: ch.syncEnabled,
+        lastSyncAt: mostRecentActivity || ch.lastSyncAt, // Show most recent operational activity
+        lastOrderPollAt: ch.lastOrderPollAt,
+        lastProductPollAt: ch.lastProductPollAt,
+        hasWebhook,
+        status,
+      };
+    });
+
+    // 2. SYNC COUNTS using groupBy for efficiency
+    const [productGroups, orderGroups, returnGroups] = await Promise.all([
+      prisma.product.groupBy({
+        by: ['syncStatus'],
+        where: { clientId },
+        _count: true,
+      }),
+      prisma.order.groupBy({
+        by: ['syncStatus'],
+        where: { clientId },
+        _count: true,
+      }),
+      prisma.return.groupBy({
+        by: ['syncStatus'],
+        where: { clientId },
+        _count: true,
+      }),
+    ]);
+
+    const toSyncCounts = (groups: { syncStatus: string; _count: number }[], includeConflict = false) => {
+      const map: Record<string, number> = {};
+      for (const g of groups) {
+        map[g.syncStatus] = g._count;
+      }
+      const total = Object.values(map).reduce((a, b) => a + b, 0);
+      return {
+        total,
+        synced: map['SYNCED'] || 0,
+        pending: map['PENDING'] || 0,
+        error: map['ERROR'] || 0,
+        ...(includeConflict ? { conflict: map['CONFLICT'] || 0 } : {}),
+      };
+    };
+
+    // 3. FFN STATUS
+    const [jtlConfig, ffnErrorCount, ffnHeldCount, ffnPendingCount] = await Promise.all([
+      prisma.jtlConfig.findUnique({ where: { clientId_fk: clientId } }),
+      prisma.order.count({ where: { clientId, ffnSyncError: { not: null } } }),
+      prisma.order.count({ where: { clientId, isOnHold: true, holdReason: 'AWAITING_PAYMENT' } }),
+      prisma.order.count({ where: { clientId, syncStatus: 'PENDING', lastSyncedToFfn: null } }),
+    ]);
+
+    // 3.5 FFN TO PLATFORM STATUS (Stock sync from JTL back to our platform)
+    const lastStockSync = await prisma.product.findFirst({
+      where: { clientId, jtlProductId: { not: null } },
+      orderBy: { lastJtlSync: 'desc' },
+      select: { lastJtlSync: true },
+    });
+
+    const recentStockUpdates = await prisma.product.count({
+      where: {
+        clientId,
+        jtlProductId: { not: null },
+        lastJtlSync: { gte: twentyFourHoursAgo },
+      },
+    });
+
+    const orderStatusUpdatesFromFFN = await prisma.order.count({
+      where: {
+        clientId,
+        lastJtlSync: { gte: twentyFourHoursAgo },
+        ffnSyncError: null, // Only count successful syncs (no errors)
+      },
+    });
+
+    // 3.6 COMMERCE FULFILLMENT SYNC STATUS
+    // Orders that are SHIPPED in FFN but need to sync back to Shopify/WooCommerce
+    const [commerceSyncedCount, commercePendingCount, commerceFailedCount, commerceFailedOrders] = await Promise.all([
+      // Successfully synced to commerce platform
+      prisma.order.count({
+        where: {
+          clientId,
+          fulfillmentState: 'SHIPPED',
+          lastSyncedToCommerce: { not: null },
+          commerceSyncError: null,
+          channelId: { not: null },
+        },
+      }),
+      // Pending sync (in queue, no error yet)
+      prisma.order.count({
+        where: {
+          clientId,
+          fulfillmentState: 'SHIPPED',
+          lastSyncedToCommerce: null,
+          commerceSyncError: null,
+          channelId: { not: null },
+        },
+      }),
+      // Failed sync (has error, needs attention)
+      prisma.order.count({
+        where: {
+          clientId,
+          fulfillmentState: 'SHIPPED',
+          commerceSyncError: { not: null },
+          channelId: { not: null },
+        },
+      }),
+      // List of failed orders (for debugging)
+      prisma.order.findMany({
+        where: {
+          clientId,
+          fulfillmentState: 'SHIPPED',
+          commerceSyncError: { not: null },
+          channelId: { not: null },
+        },
+        select: {
+          id: true,
+          orderId: true,
+          orderNumber: true,
+          commerceSyncError: true,
+          updatedAt: true,
+        },
+        orderBy: { updatedAt: 'desc' },
+        take: 10,
+      }),
+    ]);
+
+    // 4. RECENT ERRORS (last 24h, limit 20)
+    const [productErrors, orderErrors, returnErrors] = await Promise.all([
+      prisma.productSyncLog.findMany({
+        where: {
+          product: { clientId },
+          success: false,
+          createdAt: { gte: twentyFourHoursAgo },
+        },
+        select: {
+          id: true,
+          action: true,
+          targetPlatform: true,
+          errorMessage: true,
+          createdAt: true,
+          product: { select: { id: true, name: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 20,
+      }),
+      prisma.orderSyncLog.findMany({
+        where: {
+          order: { clientId },
+          success: false,
+          createdAt: { gte: twentyFourHoursAgo },
+        },
+        select: {
+          id: true,
+          action: true,
+          targetPlatform: true,
+          errorMessage: true,
+          createdAt: true,
+          order: { select: { id: true, orderNumber: true, orderId: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 20,
+      }),
+      prisma.returnSyncLog.findMany({
+        where: {
+          return: { clientId },
+          success: false,
+          createdAt: { gte: twentyFourHoursAgo },
+        },
+        select: {
+          id: true,
+          action: true,
+          targetPlatform: true,
+          errorMessage: true,
+          createdAt: true,
+          return: { select: { id: true, returnId: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 20,
+      }),
+    ]);
+
+    const recentErrors = [
+      ...productErrors.map((e) => ({
+        id: e.id,
+        type: 'product' as const,
+        action: e.action,
+        targetPlatform: e.targetPlatform,
+        errorMessage: e.errorMessage,
+        entityId: e.product.id,
+        entityName: e.product.name,
+        createdAt: e.createdAt,
+      })),
+      ...orderErrors.map((e) => ({
+        id: e.id,
+        type: 'order' as const,
+        action: e.action,
+        targetPlatform: e.targetPlatform,
+        errorMessage: e.errorMessage,
+        entityId: e.order.id,
+        entityName: e.order.orderNumber || e.order.orderId,
+        createdAt: e.createdAt,
+      })),
+      ...returnErrors.map((e) => ({
+        id: e.id,
+        type: 'return' as const,
+        action: e.action,
+        targetPlatform: e.targetPlatform,
+        errorMessage: e.errorMessage,
+        entityId: e.return.id,
+        entityName: e.return.returnId,
+        createdAt: e.createdAt,
+      })),
+    ]
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .slice(0, 20);
+
+    // 5. LAST SYNC JOB
+    const lastSyncJob = await prisma.syncJob.findFirst({
+      where: { channel: { clientId } },
+      orderBy: { startedAt: 'desc' },
+      select: {
+        status: true,
+        type: true,
+        startedAt: true,
+        completedAt: true,
+      },
+    });
+
+    res.json({
+      success: true,
+      data: {
+        channels: channelData,
+        sync: {
+          products: toSyncCounts(productGroups as any, true),
+          orders: toSyncCounts(orderGroups as any),
+          returns: toSyncCounts(returnGroups as any),
+        },
+        ffn: {
+          connected: !!jtlConfig?.isActive,
+          lastSyncAt: jtlConfig?.lastSyncAt || null,
+          pendingOrders: ffnPendingCount,
+          errorOrders: ffnErrorCount,
+          heldOrders: ffnHeldCount,
+        },
+        ffnToPlatform: {
+          lastStockSync: lastStockSync?.lastJtlSync?.toISOString() || null,
+          recentStockUpdates,
+          orderStatusUpdates: orderStatusUpdatesFromFFN,
+        },
+        commerceSync: {
+          syncedOrders: commerceSyncedCount,
+          pendingOrders: commercePendingCount,
+          failedOrders: commerceFailedCount,
+          failedOrdersList: commerceFailedOrders.map(o => ({
+            id: o.id,
+            orderNumber: o.orderNumber || o.orderId,
+            error: o.commerceSyncError,
+            lastAttempt: o.updatedAt.toISOString(),
+          })),
+        },
+        recentErrors,
+        lastSyncJob: lastSyncJob || null,
+        generatedAt: now.toISOString(),
+      },
+    });
+  } catch (error: any) {
+    console.error('Error fetching health status:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to fetch health status',
+    });
+  }
+});
+
 export default router;

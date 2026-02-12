@@ -883,6 +883,12 @@ export function createSyncAdminRoutes(prisma: PrismaClient): Router {
             ? `✅ Updated ${result.updatesProcessed} order(s). ${result.unchanged || 0} order(s) unchanged.`
             : `No status changes found in JTL. ${result.unchanged || 0} order(s) already up to date.`,
         });
+      } else if (result.error === 'JTL_TOKEN_REVOKED') {
+        res.status(401).json({
+          success: false,
+          error: 'JTL_TOKEN_REVOKED',
+          message: 'JTL FFN connection expired. Please re-authorize in Channel Settings.',
+        });
       } else {
         res.status(400).json({ success: false, error: result.error });
       }

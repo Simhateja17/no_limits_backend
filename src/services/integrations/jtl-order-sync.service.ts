@@ -764,6 +764,20 @@ export class JTLOrderSyncService {
 
             return { success: true, updatesProcessed: processed, unchanged: unchanged };
         } catch (error: any) {
+            const errorMessage = error.message || String(error);
+
+            // Detect token revocation (JTL OAuth returns these when refresh token is revoked)
+            if (errorMessage.includes('invalid_request') ||
+                errorMessage.includes('refresh token is invalid') ||
+                errorMessage.includes('Token has been revoked')) {
+                this.syncLogger.getLogger().warn({
+                    event: 'jtl_token_revoked',
+                    clientId,
+                    error: errorMessage
+                });
+                return { success: false, updatesProcessed: 0, unchanged: 0, error: 'JTL_TOKEN_REVOKED' };
+            }
+
             this.syncLogger.getLogger().error({
                 event: 'ffn_poll_failed',
                 clientId,
