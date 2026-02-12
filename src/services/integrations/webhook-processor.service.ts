@@ -450,7 +450,7 @@ export class WebhookProcessorService {
     // Find existing order
     const existingOrder = await this.prisma.order.findFirst({
       where: {
-        channelId,
+        clientId,
         externalOrderId: externalId,
       },
     });
@@ -550,7 +550,7 @@ export class WebhookProcessorService {
       }
 
       if (action === 'create' || (action === 'updated' && !existingOrder)) {
-        const orderId = `SHOP-${payload.name.replace('#', '')}`;
+        const orderId = externalId;
         const status = this.mapShopifyOrderStatus(payload.fulfillment_status, payload.financial_status);
 
         // Check if order requires payment hold (Shopify paid statuses: paid, authorized, partially_paid)
@@ -963,7 +963,7 @@ export class WebhookProcessorService {
 
     const existingOrder = await this.prisma.order.findFirst({
       where: {
-        channelId,
+        clientId,
         externalOrderId: externalId,
       },
     });
@@ -1067,7 +1067,7 @@ export class WebhookProcessorService {
       }
 
       if (action === 'created' || (action === 'updated' && !existingOrder)) {
-        const orderId = `WOO-${payload.number}`;
+        const orderId = externalId;
         const status = this.mapWooCommerceOrderStatus(payload.status);
 
         // Check if order requires payment hold (WooCommerce unpaid statuses: pending, on-hold)

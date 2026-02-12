@@ -840,6 +840,7 @@ export class EnhancedWebhookProcessor {
           quantity: item.quantity,
           unitPrice: parseFloat(item.price),
           totalPrice: parseFloat(item.price) * item.quantity,
+          weightInKg: item.grams ? item.grams / 1000 : undefined,  // Convert grams to kg
         })),
 
         // Notes
@@ -1605,6 +1606,9 @@ export class EnhancedWebhookProcessor {
           quantity: item.quantity,
           unitPrice: item.price || parseFloat(item.total) / item.quantity,
           totalPrice: parseFloat(item.total),
+          // Note: WooCommerce webhooks typically don't include weight in line_items
+          // Weight would need to be fetched from product API if needed in the future
+          weightInKg: undefined,
         })),
 
         // Notes

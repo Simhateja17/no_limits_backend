@@ -1105,7 +1105,7 @@ export class JTLOrderSyncService {
         // Check if order already exists in DB
         const existingOrder = await this.prisma.order.findFirst({
             where: {
-                channelId: channel.id,
+                clientId: channel.clientId,
                 externalOrderId: externalOrderId,
             },
         });
@@ -1207,13 +1207,8 @@ export class JTLOrderSyncService {
             : new Date();
 
         // Create order with items
-        // IMPORTANT: orderId format must match what webhooks create, so FFN reconciliation works
-        // Webhooks use: SHOP-{orderNumber} or WOO-{orderNumber}
-        // e.g., "SHOP-1001" (NOT "SHOP-5998766743874" with the internal ID)
-        const cleanOrderNumber = String(orderNumber).replace(/^#/, '');
-        const orderId = isShopify
-            ? `SHOP-${cleanOrderNumber}`
-            : `WOO-${cleanOrderNumber}`;
+        // orderId uses externalOrderId (platform's numeric ID) — consistent with all webhook paths
+        const orderId = externalOrderId;
 
         const newOrder = await this.prisma.order.create({
             data: {

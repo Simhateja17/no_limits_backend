@@ -953,6 +953,7 @@ model Order {
   notifications       Notification[]
 
   @@unique([clientId, orderId])
+  @@unique([clientId, externalOrderId])
   @@index([orderOrigin])
   @@index([fulfillmentState])
   @@index([syncStatus])
@@ -998,13 +999,14 @@ model OrderItem {
   quantity    Int
   unitPrice   Decimal?  @db.Decimal(12, 2)
   totalPrice  Decimal?  @db.Decimal(12, 2)
-  
+  weightInKg  Decimal?  @db.Decimal(10, 3)  // Weight per unit in kilograms
+
   orderId     String    @map("order_id")
   order       Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  
+
   productId   String?   @map("product_id")
   product     Product?  @relation(fields: [productId], references: [id])
-  
+
   @@map("order_items")
 }
 

@@ -98,9 +98,6 @@ interface ProductSyncData {
   name: string;
   gtin?: string;
   weight?: number;
-  lengthInCm?: number;
-  widthInCm?: number;
-  heightInCm?: number;
   imageUrl?: string;
   isBundle?: boolean;
   bundleComponents?: Array<{
@@ -350,9 +347,6 @@ export class SyncOrchestrator {
             name: `${product.title}${variant.title !== 'Default Title' ? ` - ${variant.title}` : ''}`,
             gtin: variant.barcode || undefined,
             weight: variant.weight,
-            lengthInCm: variant.length_in_cm,
-            widthInCm: variant.width_in_cm,
-            heightInCm: variant.height_in_cm,
             imageUrl: product.images[0]?.src,
             // Only first variant gets bundle data
             isBundle: isBundle && i === 0,
@@ -390,9 +384,6 @@ export class SyncOrchestrator {
           name: product.name,
           gtin: undefined, // WooCommerce doesn't have GTIN by default
           weight: product.weight ? parseFloat(product.weight) : undefined,
-          lengthInCm: product.dimensions?.length ? parseFloat(product.dimensions.length) : undefined,
-          widthInCm: product.dimensions?.width ? parseFloat(product.dimensions.width) : undefined,
-          heightInCm: product.dimensions?.height ? parseFloat(product.dimensions.height) : undefined,
           imageUrl: product.images[0]?.src,
           isBundle,
           bundleComponents,
@@ -453,25 +444,12 @@ export class SyncOrchestrator {
 
     if (existingProduct) {
       // Update existing product
-      // Note: dimensions/weight are ops-owned, only set if not already populated
-      const dimensionUpdates: Record<string, number> = {};
-      if (productData.heightInCm != null && existingProduct.heightInCm == null) {
-        dimensionUpdates.heightInCm = productData.heightInCm;
-      }
-      if (productData.lengthInCm != null && existingProduct.lengthInCm == null) {
-        dimensionUpdates.lengthInCm = productData.lengthInCm;
-      }
-      if (productData.widthInCm != null && existingProduct.widthInCm == null) {
-        dimensionUpdates.widthInCm = productData.widthInCm;
-      }
-
       await this.prisma.product.update({
         where: { id: existingProduct.id },
         data: {
           name: productData.name,
           sku: productData.sku,
           gtin: productData.gtin,
-          ...dimensionUpdates,
           updatedAt: new Date(),
         },
       });
@@ -513,9 +491,6 @@ export class SyncOrchestrator {
           name: productData.name,
           sku: productData.sku,
           gtin: productData.gtin,
-          heightInCm: productData.heightInCm,
-          lengthInCm: productData.lengthInCm,
-          widthInCm: productData.widthInCm,
           isActive: true,
           channels: {
             create: {
@@ -1032,7 +1007,7 @@ export class SyncOrchestrator {
     // Find existing order
     const existingOrder = await this.prisma.order.findFirst({
       where: {
-        channelId: this.config.channelId,
+        clientId: channel.clientId,
         externalOrderId: orderData.externalOrderId,
       },
     });
@@ -1122,7 +1097,7 @@ export class SyncOrchestrator {
       // Create new order
       const newOrder = await this.prisma.order.create({
         data: {
-          orderId: `ORD-${Date.now()}`, // Generate unique order ID
+          orderId: orderData.externalOrderId,
           clientId: channel.clientId,
           channelId: this.config.channelId,
           externalOrderId: orderData.externalOrderId,
