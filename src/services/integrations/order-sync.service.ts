@@ -346,6 +346,8 @@ export class OrderSyncService {
             discountAmount: data.discountAmount ? new Prisma.Decimal(data.discountAmount) : undefined,
             paymentStatus: data.paymentStatus,
             paymentMethod: data.paymentMethod,
+            ...(data.shippingMethod !== undefined ? { shippingMethod: data.shippingMethod } : {}),
+            ...(data.shippingMethodCode !== undefined ? { shippingMethodCode: data.shippingMethodCode } : {}),
             customerName: data.customerName,
             customerEmail: data.customerEmail,
             customerPhone: data.customerPhone,

@@ -127,6 +127,9 @@ export interface ShopifyVariant {
   weight_unit: string;
   inventory_quantity: number;
   inventory_item_id: number;
+  length_in_cm?: number;
+  width_in_cm?: number;
+  height_in_cm?: number;
 }
 
 export interface ShopifyProductImage {

@@ -114,6 +114,11 @@ interface GraphQLOrder {
   cancelReason?: string;
 }
 
+interface GraphQLMeasurementValue {
+  value: number;
+  unit: string;
+}
+
 interface GraphQLProductVariant {
   id: string;
   legacyResourceId?: string;
@@ -126,10 +131,10 @@ interface GraphQLProductVariant {
     id: string;
     legacyResourceId?: string;
     measurement?: {
-      weight?: {
-        value: number;
-        unit: string;  // GRAMS, KILOGRAMS, OUNCES, POUNDS
-      };
+      weight?: GraphQLMeasurementValue;  // unit: GRAMS, KILOGRAMS, OUNCES, POUNDS
+      length?: GraphQLMeasurementValue;  // unit: CENTIMETERS, METERS, INCHES, FEET, MILLIMETERS
+      width?: GraphQLMeasurementValue;
+      height?: GraphQLMeasurementValue;
     };
   };
 }
@@ -334,6 +339,25 @@ export function mapOrder(order: GraphQLOrder): ShopifyOrder {
  * Map GraphQL product variant to REST format
  * Note: weight is now at inventoryItem.measurement.weight (API 2024-07+)
  */
+/**
+ * Convert a Shopify length measurement to centimeters
+ */
+function convertToCm(value: number, unit: string): number {
+  switch (unit) {
+    case 'METERS':
+      return value * 100;
+    case 'INCHES':
+      return value * 2.54;
+    case 'FEET':
+      return value * 30.48;
+    case 'MILLIMETERS':
+      return value / 10;
+    case 'CENTIMETERS':
+    default:
+      return value;
+  }
+}
+
 export function mapVariant(variant: GraphQLProductVariant, productId: number): ShopifyVariant {
   // Extract weight from the new inventoryItem.measurement.weight path
   const weightMeasurement = variant.inventoryItem?.measurement?.weight;
@@ -360,6 +384,18 @@ export function mapVariant(variant: GraphQLProductVariant, productId: number): S
     }
   }
 
+  // Extract dimensions from inventoryItem.measurement and convert to cm
+  const measurement = variant.inventoryItem?.measurement;
+  const lengthInCm = measurement?.length?.value
+    ? convertToCm(measurement.length.value, measurement.length.unit)
+    : undefined;
+  const widthInCm = measurement?.width?.value
+    ? convertToCm(measurement.width.value, measurement.width.unit)
+    : undefined;
+  const heightInCm = measurement?.height?.value
+    ? convertToCm(measurement.height.value, measurement.height.unit)
+    : undefined;
+
   return {
     id: getNumericId(variant.id, variant.legacyResourceId),
     product_id: productId,
@@ -372,6 +408,9 @@ export function mapVariant(variant: GraphQLProductVariant, productId: number): S
     weight_unit: weightUnit.toLowerCase(),
     inventory_quantity: variant.inventoryQuantity || 0,
     inventory_item_id: variant.inventoryItem ? getNumericId(variant.inventoryItem.id, variant.inventoryItem.legacyResourceId) : 0,
+    length_in_cm: lengthInCm,
+    width_in_cm: widthInCm,
+    height_in_cm: heightInCm,
   };
 }
 
