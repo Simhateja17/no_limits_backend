@@ -1377,6 +1377,11 @@ router.get('/orders/:id', async (req: Request, res: Response) => {
             product: true,
           },
         },
+        shipments: {
+          orderBy: {
+            shippedAt: 'asc',
+          },
+        },
         channel: true,
         syncLogs: {
           orderBy: {

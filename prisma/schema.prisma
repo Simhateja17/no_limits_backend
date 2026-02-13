@@ -934,6 +934,7 @@ model Order {
   shopifyFulfillmentRequestStatus  String?    // UNSUBMITTED, SUBMITTED, ACCEPTED, REJECTED, CANCELLATION_REQUESTED, etc.
   shopifyFulfillmentHoldReason     String?    // If on hold: AWAITING_PAYMENT, HIGH_RISK_OF_FRAUD, INCORRECT_ADDRESS, INVENTORY_OUT_OF_STOCK, OTHER
   shopifyFulfillmentHoldNotes      String?    // Notes about the hold
+  shopifyFulfillmentGid            String?    // Shopify Fulfillment GID — needed for tracking updates
 
   createdAt           DateTime    @default(now())
   updatedAt           DateTime    @updatedAt
@@ -946,6 +947,7 @@ model Order {
   channel             Channel?    @relation(fields: [channelId], references: [id])
   
   items               OrderItem[]
+  shipments           Shipment[]
   returns             Return[]
   syncLogs            OrderSyncLog[]
   syncQueue           OrderSyncQueue[]
@@ -953,7 +955,7 @@ model Order {
   notifications       Notification[]
 
   @@unique([clientId, orderId])
-  @@unique([clientId, externalOrderId])
+  @@index([clientId, externalOrderId])  // Not unique — replacement orders share the same externalOrderId
   @@index([orderOrigin])
   @@index([fulfillmentState])
   @@index([syncStatus])
@@ -1008,6 +1010,25 @@ model OrderItem {
   product     Product?  @relation(fields: [productId], references: [id])
 
   @@map("order_items")
+}
+
+// Shipment - Multi-package tracking for fulfillments
+model Shipment {
+  id                    String    @id @default(cuid())
+  trackingNumber        String
+  carrier               String?
+  trackingUrl           String?
+  shippedAt             DateTime  @default(now())
+  status                String    @default("shipped")
+  shopifyFulfillmentGid String?
+  orderId               String    @map("order_id")
+  order                 Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  lineItems             Json?     // [{sku, quantity}] — which items in this package
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@index([orderId])
+  @@map("shipments")
 }
 
 // Inbound Delivery

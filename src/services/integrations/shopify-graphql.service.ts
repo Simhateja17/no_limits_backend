@@ -560,7 +560,7 @@ export class ShopifyGraphQLService {
     line_items?: { id: number; quantity?: number }[];
     notify_customer?: boolean;
     message?: string;
-  }): Promise<{ id: number; status: string; tracking_number: string | null }> {
+  }): Promise<{ id: number; gid: string; status: string; tracking_number: string | null }> {
     // Get fulfillment orders for this order
     const fulfillmentOrders = await this.getFulfillmentOrders(orderId);
 
@@ -654,6 +654,7 @@ export class ShopifyGraphQLService {
     const created = data.fulfillmentCreate.fulfillment;
     return {
       id: toLegacyId(created.legacyResourceId || created.id),
+      gid: created.id,
       status: created.status.toLowerCase(),
       tracking_number: created.trackingInfo?.[0]?.number || null,
     };

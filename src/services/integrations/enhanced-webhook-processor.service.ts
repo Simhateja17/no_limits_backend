@@ -178,6 +178,10 @@ interface ShopifyFulfillmentOrderPayload {
     fulfillable_quantity: number;
     variant_id: number;
   }>;
+  fulfillment_holds?: Array<{
+    reason: string;
+    reason_notes?: string;
+  }>;
 }
 
 interface ShopifyRefundPayload {
@@ -1239,25 +1243,97 @@ export class EnhancedWebhookProcessor {
           break;
 
         case 'placed_on_hold':
-          // FulfillmentOrder placed on hold
+          // FulfillmentOrder placed on hold — store hold reason from Shopify payload
           await this.prisma.order.update({
             where: { id: order.id },
             data: {
               isOnHold: true,
               shopifyFulfillmentOrderStatus: 'ON_HOLD',
+              shopifyFulfillmentHoldReason: payload.fulfillment_holds?.[0]?.reason || null,
+              shopifyFulfillmentHoldNotes: payload.fulfillment_holds?.[0]?.reason_notes || null,
+              holdReason: payload.fulfillment_holds?.[0]?.reason || 'OTHER',
+              holdPlacedBy: 'SHOPIFY',
+              holdPlacedAt: new Date(),
             },
           });
           break;
 
         case 'hold_released':
-          // Hold released
+          // Hold released — re-queue for FFN sync if order hasn't been sent yet
           await this.prisma.order.update({
             where: { id: order.id },
             data: {
               isOnHold: false,
               shopifyFulfillmentOrderStatus: 'OPEN',
+              shopifyFulfillmentHoldReason: null,
+              shopifyFulfillmentHoldNotes: null,
+              holdReason: null,
+              holdReleasedAt: new Date(),
+              holdReleasedBy: 'SHOPIFY',
             },
           });
+
+          // Re-queue for FFN sync if order hasn't been synced and isn't cancelled
+          if (!order.jtlOutboundId && !order.isCancelled) {
+            try {
+              const { getQueue, QUEUE_NAMES } = await import('../queue/sync-queue.service.js');
+              const queue = getQueue();
+              await queue.enqueue(
+                QUEUE_NAMES.ORDER_SYNC_TO_FFN,
+                {
+                  orderId: order.id,
+                  origin: 'shopify' as const,
+                  operation: 'create' as const,
+                },
+                {
+                  priority: 1,
+                  retryLimit: 3,
+                  retryDelay: 60,
+                  retryBackoff: true,
+                }
+              );
+              console.log(`[Webhook] Re-queued order ${order.id} for FFN sync after Shopify hold release`);
+            } catch (queueError) {
+              console.error(`[Webhook] Failed to re-queue order ${order.id} for FFN sync:`, queueError);
+            }
+          }
+          break;
+
+        case 'cancelled':
+          // FulfillmentOrder cancelled in Shopify
+          await this.prisma.order.update({
+            where: { id: order.id },
+            data: {
+              isCancelled: true,
+              cancelledAt: new Date(),
+              cancelledBy: 'SHOPIFY',
+              shopifyFulfillmentOrderStatus: 'CANCELLED',
+            },
+          });
+
+          // If order has a JTL outbound, queue cancellation in JTL
+          if (order.jtlOutboundId) {
+            try {
+              const { getQueue, QUEUE_NAMES } = await import('../queue/sync-queue.service.js');
+              const queue = getQueue();
+              await queue.enqueue(
+                QUEUE_NAMES.ORDER_CANCEL_SYNC,
+                {
+                  orderId: order.id,
+                  origin: 'shopify' as const,
+                  operation: 'cancel' as const,
+                },
+                {
+                  priority: 2,
+                  retryLimit: 3,
+                  retryDelay: 30,
+                }
+              );
+              console.log(`[Webhook] Queued JTL cancellation for order ${order.id} after Shopify FO cancel`);
+            } catch (queueError) {
+              console.error(`[Webhook] Failed to queue JTL cancellation for order ${order.id}:`, queueError);
+            }
+          }
           break;
 
         case 'moved':

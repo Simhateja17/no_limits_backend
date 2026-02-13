@@ -1703,6 +1703,47 @@ export class JTLService {
   }
 
   /**
+   * Extract ALL tracking info from shipping notifications (multi-package support)
+   * Returns an array of all packages with tracking numbers instead of just the first
+   */
+  extractAllTrackingInfo(shippingNotifications: {
+    packages: Array<{
+      freightOption: string;
+      estimatedDeliveryDate?: string;
+      trackingUrl?: string;
+      identifier: Array<{
+        value: string;
+        identifierType: string;
+        name?: string;
+      }>;
+    }>;
+  }): Array<{
+    trackingNumber?: string;
+    trackingUrl?: string;
+    carrier?: string;
+  }> {
+    if (!shippingNotifications.packages?.length) {
+      console.log(`[JTL] extractAllTrackingInfo: No packages found`);
+      return [];
+    }
+
+    const results = shippingNotifications.packages.map(pkg => {
+      const trackingId = pkg.identifier?.find(
+        id => id.identifierType === 'TrackingId'
+      );
+
+      return {
+        trackingNumber: trackingId?.value,
+        trackingUrl: pkg.trackingUrl,
+        carrier: pkg.freightOption,
+      };
+    }).filter(pkg => pkg.trackingNumber); // Only include packages with tracking numbers
+
+    console.log(`[JTL] extractAllTrackingInfo: Found ${results.length} packages with tracking`);
+    return results;
+  }
+
+  /**
    * Poll for outbound status changes since last check
    * Returns outbounds that have been updated
    *

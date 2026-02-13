@@ -528,6 +528,32 @@ export const holdOrder = async (req: Request, res: Response): Promise<void> => {
       },
     });
 
+    // Queue Shopify hold sync (non-blocking — local hold still takes effect even if Shopify call fails)
+    if (order.shopifyFulfillmentOrderId) {
+      try {
+        const queue = getQueue();
+        await queue.enqueue(
+          QUEUE_NAMES.ORDER_SYNC_TO_COMMERCE,
+          {
+            orderId: order.id,
+            origin: 'nolimits' as const,
+            operation: 'hold' as const,
+            holdReason: reason,
+          },
+          {
+            retryLimit: 3,
+            retryDelay: 30,
+            retryBackoff: true,
+            singletonKey: `hold-${order.id}`,
+          }
+        );
+        console.log(`[FulfillmentController] Queued Shopify hold sync for order ${orderId}`);
+      } catch (queueError) {
+        console.error(`[FulfillmentController] Failed to queue Shopify hold for order ${orderId}:`, queueError);
+        // Non-fatal — local hold still applies
+      }
+    }
+
     res.json({
       success: true,
       message: 'Order placed on hold',
@@ -629,6 +655,31 @@ export const releaseHold = async (req: Request, res: Response): Promise<void> =>
         changedFields: ['isOnHold', 'holdReason', 'priorityLevel'],
       },
     });
+
+    // Queue Shopify release_hold sync (non-blocking)
+    if (order.shopifyFulfillmentOrderId) {
+      try {
+        const queue = getQueue();
+        await queue.enqueue(
+          QUEUE_NAMES.ORDER_SYNC_TO_COMMERCE,
+          {
+            orderId: order.id,
+            origin: 'nolimits' as const,
+            operation: 'release_hold' as const,
+          },
+          {
+            retryLimit: 3,
+            retryDelay: 30,
+            retryBackoff: true,
+            singletonKey: `release-hold-${order.id}`,
+          }
+        );
+        console.log(`[FulfillmentController] Queued Shopify release_hold sync for order ${orderId}`);
+      } catch (queueError) {
+        console.error(`[FulfillmentController] Failed to queue Shopify release_hold for order ${orderId}:`, queueError);
+        // Non-fatal — local release still applies
+      }
+    }
 
     // If this was a payment hold and order not yet synced to FFN, queue it now
     if (isPaymentHold && !order.jtlOutboundId) {

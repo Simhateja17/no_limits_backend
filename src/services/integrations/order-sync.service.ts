@@ -25,7 +25,8 @@ import {
 } from '@prisma/client';
 import { ShopifyService } from './shopify.service.js';
 import { WooCommerceService } from './woocommerce.service.js';
-import { createShopifyServiceAuto } from './shopify-service-factory.js';
+import { createShopifyServiceAuto, isGraphQLService } from './shopify-service-factory.js';
+import { ShopifyGraphQLService } from './shopify-graphql.service.js';
 import { getEncryptionService } from '../encryption.service.js';
 import { JTLService } from './jtl.service.js';
 import ShippingMethodService from '../shipping-method.service.js';
@@ -1046,7 +1047,7 @@ export class OrderSyncService {
    */
   async syncOperationalToCommerce(
     orderId: string,
-    operation: 'create' | 'update' | 'cancel' | 'fulfill'
+    operation: 'create' | 'update' | 'cancel' | 'fulfill' | 'hold' | 'release_hold' | 'update_tracking'
   ): Promise<{ success: boolean; error?: string }> {
     try {
       const order = await this.prisma.order.findUnique({
@@ -1066,6 +1067,12 @@ export class OrderSyncService {
         await this.syncCancellationToCommerce(order, true);
       } else if (operation === 'fulfill') {
         await this.syncOperationalToCommerceInternal(order, ['trackingNumber', 'shippedAt', 'fulfillmentState']);
+      } else if (operation === 'hold') {
+        await this.syncHoldToCommerce(order);
+      } else if (operation === 'release_hold') {
+        await this.syncHoldReleaseToCommerce(order);
+      } else if (operation === 'update_tracking') {
+        await this.syncTrackingUpdateToCommerce(order);
       } else {
         // For create/update, sync all trackable operational fields
         await this.syncOperationalToCommerceInternal(order, ['trackingNumber', 'shippedAt', 'fulfillmentState', 'carrierSelection']);
@@ -1075,6 +1082,152 @@ export class OrderSyncService {
     } catch (error: any) {
       console.error(`[OrderSync] syncOperationalToCommerce failed:`, error);
       return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Sync hold state to Shopify — places a FulfillmentOrder on hold
+   */
+  private async syncHoldToCommerce(order: any): Promise<void> {
+    if (order.channel?.type !== 'SHOPIFY' || !order.shopifyFulfillmentOrderId) {
+      console.log(`[OrderSync] Skipping hold sync — no Shopify FulfillmentOrder for order ${order.id}`);
+      return;
+    }
+
+    const encryptionService = getEncryptionService();
+    if (!order.channel.shopDomain || !order.channel.accessToken) {
+      console.warn(`[OrderSync] Missing Shopify credentials for channel ${order.channel.id}`);
+      return;
+    }
+
+    const shopifyService = createShopifyServiceAuto({
+      shopDomain: order.channel.shopDomain,
+      accessToken: encryptionService.safeDecrypt(order.channel.accessToken),
+    });
+
+    // Map our hold reason to Shopify's accepted reasons
+    const reasonMap: Record<string, 'AWAITING_PAYMENT' | 'HIGH_RISK_OF_FRAUD' | 'INCORRECT_ADDRESS' | 'INVENTORY_OUT_OF_STOCK' | 'OTHER'> = {
+      'AWAITING_PAYMENT': 'AWAITING_PAYMENT',
+      'HIGH_RISK_OF_FRAUD': 'HIGH_RISK_OF_FRAUD',
+      'INCORRECT_ADDRESS': 'INCORRECT_ADDRESS',
+      'INVENTORY_OUT_OF_STOCK': 'INVENTORY_OUT_OF_STOCK',
+    };
+    const shopifyReason = reasonMap[order.holdReason || ''] || 'OTHER';
+
+    if (!isGraphQLService(shopifyService)) {
+      console.warn(`[OrderSync] Hold sync requires GraphQL service — skipping for order ${order.id}`);
+      return;
+    }
+
+    const result = await shopifyService.holdFulfillmentOrder(
+      order.shopifyFulfillmentOrderId,
+      shopifyReason,
+      order.holdNotes || undefined,
+    );
+
+    if (result.success) {
+      await this.prisma.order.update({
+        where: { id: order.id },
+        data: {
+          shopifyFulfillmentOrderStatus: result.fulfillmentOrder?.status || 'ON_HOLD',
+        },
+      });
+      console.log(`[OrderSync] Shopify FulfillmentOrder ${order.shopifyFulfillmentOrderId} placed on hold`);
+    } else {
+      console.error(`[OrderSync] Failed to hold Shopify FulfillmentOrder: ${result.error}`);
+      throw new Error(`Shopify hold failed: ${result.error}`);
+    }
+  }
+
+  /**
+   * Sync hold release to Shopify — releases a FulfillmentOrder from hold
+   */
+  private async syncHoldReleaseToCommerce(order: any): Promise<void> {
+    if (order.channel?.type !== 'SHOPIFY' || !order.shopifyFulfillmentOrderId) {
+      console.log(`[OrderSync] Skipping release_hold sync — no Shopify FulfillmentOrder for order ${order.id}`);
+      return;
+    }
+
+    const encryptionService = getEncryptionService();
+    if (!order.channel.shopDomain || !order.channel.accessToken) {
+      console.warn(`[OrderSync] Missing Shopify credentials for channel ${order.channel.id}`);
+      return;
+    }
+
+    const shopifyService = createShopifyServiceAuto({
+      shopDomain: order.channel.shopDomain,
+      accessToken: encryptionService.safeDecrypt(order.channel.accessToken),
+    });
+
+    if (!isGraphQLService(shopifyService)) {
+      console.warn(`[OrderSync] Release hold sync requires GraphQL service — skipping for order ${order.id}`);
+      return;
+    }
+
+    const result = await shopifyService.releaseHoldFulfillmentOrder(
+      order.shopifyFulfillmentOrderId,
+    );
+
+    if (result.success) {
+      await this.prisma.order.update({
+        where: { id: order.id },
+        data: {
+          shopifyFulfillmentOrderStatus: result.fulfillmentOrder?.status || 'OPEN',
+        },
+      });
+      console.log(`[OrderSync] Shopify FulfillmentOrder ${order.shopifyFulfillmentOrderId} released from hold`);
+    } else {
+      console.error(`[OrderSync] Failed to release hold on Shopify FulfillmentOrder: ${result.error}`);
+      throw new Error(`Shopify release_hold failed: ${result.error}`);
+    }
+  }
+
+  /**
+   * Sync tracking update to Shopify — updates tracking info on an existing fulfillment
+   */
+  private async syncTrackingUpdateToCommerce(order: any): Promise<void> {
+    if (order.channel?.type !== 'SHOPIFY') {
+      console.log(`[OrderSync] Skipping tracking update — not a Shopify order ${order.id}`);
+      return;
+    }
+
+    const encryptionService = getEncryptionService();
+    if (!order.channel.shopDomain || !order.channel.accessToken) {
+      console.warn(`[OrderSync] Missing Shopify credentials for channel ${order.channel.id}`);
+      return;
+    }
+
+    const shopifyService = createShopifyServiceAuto({
+      shopDomain: order.channel.shopDomain,
+      accessToken: encryptionService.safeDecrypt(order.channel.accessToken),
+    });
+
+    if (!isGraphQLService(shopifyService)) {
+      console.warn(`[OrderSync] Tracking update requires GraphQL service — skipping for order ${order.id}`);
+      return;
+    }
+
+    if (order.shopifyFulfillmentGid) {
+      // Fulfillment already exists — update tracking info
+      const result = await shopifyService.updateFulfillmentTracking(
+        order.shopifyFulfillmentGid,
+        {
+          number: order.trackingNumber || '',
+          company: order.carrierSelection || undefined,
+          url: order.trackingUrl || undefined,
+        },
+      );
+
+      if (result.success) {
+        console.log(`[OrderSync] Updated Shopify tracking for fulfillment ${order.shopifyFulfillmentGid}`);
+      } else {
+        console.error(`[OrderSync] Failed to update Shopify tracking: ${result.error}`);
+        throw new Error(`Shopify tracking update failed: ${result.error}`);
+      }
+    } else {
+      // No fulfillment GID yet — fall back to creating a new fulfillment
+      console.log(`[OrderSync] No fulfillment GID for order ${order.id}, falling back to fulfill operation`);
+      await this.syncOperationalToCommerceInternal(order, ['trackingNumber', 'shippedAt', 'fulfillmentState']);
     }
   }
 
@@ -1108,20 +1261,108 @@ export class OrderSyncService {
         if (commerceStatus === 'fulfilled' && order.externalOrderId) {
           const externalOrderId = parseInt(order.externalOrderId);
           if (!isNaN(externalOrderId)) {
-            try {
-              await shopifyService.createFulfillment(externalOrderId, {
-                tracking_number: order.trackingNumber || undefined,
-                tracking_company: order.carrierSelection || undefined,
-                notify_customer: true,
-              } as any);
-              console.log(`[OrderSync] Created Shopify fulfillment for order ${order.id}`);
-            } catch (fulfillError: any) {
-              if (fulfillError.message?.includes('already fulfilled')) {
-                console.log(`[OrderSync] Order ${order.id} already fulfilled in Shopify`);
-              } else if (fulfillError.message?.includes('on hold')) {
-                console.log(`[OrderSync] Order ${order.id} is on hold in Shopify: ${fulfillError.message}`);
-              } else {
-                throw fulfillError;
+            // Multi-package support: Try to get all tracking info from JTL
+            let packages: Array<{ trackingNumber?: string; trackingUrl?: string; carrier?: string }> = [];
+
+            if (this.jtlService && order.jtlOutboundId) {
+              try {
+                const outbound = await this.jtlService.getOutbound(order.jtlOutboundId);
+                const shippingNotifications = (outbound as any).shippingNotifications;
+                if (shippingNotifications) {
+                  packages = this.jtlService.extractAllTrackingInfo(shippingNotifications);
+                }
+              } catch (e) {
+                // Best effort — fall back to single tracking
+              }
+            }
+
+            // Fallback: use single tracking from Order if no JTL packages found
+            if (packages.length === 0 && order.trackingNumber) {
+              packages = [{
+                trackingNumber: order.trackingNumber,
+                carrier: order.carrierSelection || undefined,
+                trackingUrl: order.trackingUrl || undefined,
+              }];
+            }
+
+            // If no packages at all, create fulfillment without tracking
+            if (packages.length === 0) {
+              packages = [{}];
+            }
+
+            // Check existing shipments to avoid duplicates
+            const existingShipments = await this.prisma.shipment.findMany({
+              where: { orderId: order.id },
+            });
+            const existingTrackingNumbers = new Set(existingShipments.map(s => s.trackingNumber));
+
+            for (const pkg of packages) {
+              // Skip if already fulfilled with this tracking number
+              if (pkg.trackingNumber && existingTrackingNumbers.has(pkg.trackingNumber)) {
+                console.log(`[OrderSync] Skipping duplicate package ${pkg.trackingNumber} for order ${order.id}`);
+                continue;
+              }
+
+              try {
+                const result = await shopifyService.createFulfillment(externalOrderId, {
+                  tracking_number: pkg.trackingNumber || undefined,
+                  tracking_company: pkg.carrier || undefined,
+                  tracking_url: pkg.trackingUrl || undefined,
+                  notify_customer: true,
+                } as any);
+
+                // GraphQL service returns gid, REST does not
+                const fulfillmentGid = (result as any).gid as string | undefined;
+                console.log(`[OrderSync] Created Shopify fulfillment for order ${order.id}${fulfillmentGid ? ` (GID: ${fulfillmentGid})` : ''}`);
+
+                // Store Fulfillment GID on order (first fulfillment wins for backward compat)
+                if (fulfillmentGid && !order.shopifyFulfillmentGid) {
+                  await this.prisma.order.update({
+                    where: { id: order.id },
+                    data: { shopifyFulfillmentGid: fulfillmentGid },
+                  });
+                  order.shopifyFulfillmentGid = fulfillmentGid;
+                }
+
+                // Create Shipment record for multi-package tracking
+                if (pkg.trackingNumber) {
+                  await this.prisma.shipment.create({
+                    data: {
+                      orderId: order.id,
+                      trackingNumber: pkg.trackingNumber,
+                      carrier: pkg.carrier || null,
+                      trackingUrl: pkg.trackingUrl || null,
+                      shopifyFulfillmentGid: fulfillmentGid || null,
+                      status: 'shipped',
+                    },
+                  });
+                }
+              } catch (fulfillError: any) {
+                const errMsg = fulfillError.message || '';
+                if (errMsg.includes('already fulfilled')) {
+                  // Order already fulfilled — log and continue (GID can't be recovered from getFulfillmentOrders)
+                  console.log(`[OrderSync] Order ${order.id} already fulfilled in Shopify — skipping`);
+                } else if (errMsg.includes('on hold') || errMsg.includes('ON_HOLD')) {
+                  // Re-throw so pg-boss retries — the hold might be released later
+                  console.log(`[OrderSync] Order ${order.id} is on hold in Shopify — will retry`);
+                  await this.prisma.order.update({
+                    where: { id: order.id },
+                    data: { commerceSyncError: `Shopify on hold: ${errMsg}` },
+                  });
+                  throw fulfillError;
+                } else if (errMsg.includes('CANCELLED') || errMsg.includes('was cancelled')) {
+                  // Permanent failure — don't retry
+                  console.log(`[OrderSync] Order ${order.id} FulfillmentOrder was cancelled in Shopify — not retrying`);
+                  await this.prisma.order.update({
+                    where: { id: order.id },
+                    data: {
+                      commerceSyncError: `FulfillmentOrder cancelled: ${errMsg}`,
+                      shopifyFulfillmentOrderStatus: 'CANCELLED',
+                    },
+                  });
+                } else {
+                  throw fulfillError;
+                }
               }
             }
           }

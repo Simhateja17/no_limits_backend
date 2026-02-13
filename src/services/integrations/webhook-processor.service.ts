@@ -537,6 +537,11 @@ export class WebhookProcessorService {
             await this.queueJTLOrderSync(existingOrder.id, 'SHOPIFY');
             console.log(`[WebhookProcessor] Shopify order ${existingOrder.id} released from payment hold and queued for FFN sync`);
           }
+
+          // Queue Shopify release_hold if FulfillmentOrder exists
+          if (existingOrder.shopifyFulfillmentOrderId) {
+            await this.queueCommerceHoldSync(existingOrder.id, 'release_hold');
+          }
         }
 
         return {
@@ -1326,6 +1331,37 @@ export class WebhookProcessorService {
     } catch (error) {
       console.error(`[Webhook] Failed to queue JTL sync for order ${orderId}:`, error);
       // Don't throw - webhook already succeeded, we just failed to queue the sync
+    }
+  }
+
+  /**
+   * Queue hold/release_hold sync to Shopify commerce platform
+   * Non-blocking — local hold state takes effect regardless of Shopify call outcome
+   */
+  private async queueCommerceHoldSync(orderId: string, operation: 'hold' | 'release_hold', holdReason?: string): Promise<void> {
+    try {
+      const { getQueue, QUEUE_NAMES } = await import('../queue/sync-queue.service.js');
+      const queue = getQueue();
+
+      await queue.enqueue(
+        QUEUE_NAMES.ORDER_SYNC_TO_COMMERCE,
+        {
+          orderId,
+          origin: 'shopify' as const,
+          operation,
+          ...(holdReason && { holdReason }),
+        },
+        {
+          retryLimit: 3,
+          retryDelay: 30,
+          retryBackoff: true,
+          singletonKey: `${operation}-${orderId}`,
+        }
+      );
+
+      console.log(`[Webhook] Queued commerce ${operation} for order ${orderId}`);
+    } catch (error) {
+      console.error(`[Webhook] Failed to queue commerce ${operation} for order ${orderId}:`, error);
     }
   }
 

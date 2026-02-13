@@ -342,11 +342,82 @@ export class SyncScheduler {
     // First run after 2 minute delay (let queue initialize)
     setTimeout(() => {
       this.reconcileFailedCommerceSyncs();
+      this.reconcileStuckFulfillments();
     }, 2 * 60 * 1000);
 
     this.commerceReconcileTimer = setInterval(() => {
       this.reconcileFailedCommerceSyncs();
+      this.reconcileStuckFulfillments();
     }, intervalMs);
+  }
+
+  /**
+   * Reconcile stuck fulfillments — orders SHIPPED in FFN but missing Shopify Fulfillment GID.
+   * Uses JTLOrderSyncService.reconcileStuckFulfillments() per client.
+   */
+  async reconcileStuckFulfillments(): Promise<void> {
+    const jobId = generateJobId('stuck-fulfillment-reconcile');
+    const startTime = Date.now();
+
+    this.logger.debug({
+      jobId,
+      event: 'job_started',
+      operation: 'stuckFulfillmentReconcile',
+    });
+
+    try {
+      // Get distinct client IDs with active Shopify channels
+      const channels = await this.prisma.channel.findMany({
+        where: {
+          isActive: true,
+          syncEnabled: true,
+          type: 'SHOPIFY',
+        },
+        select: {
+          clientId: true,
+        },
+        distinct: ['clientId'],
+      });
+
+      const clientIds = channels.map(c => c.clientId);
+      let totalFound = 0;
+      let totalQueued = 0;
+
+      for (const clientId of clientIds) {
+        try {
+          const JTLOrderSyncService = (await import('./jtl-order-sync.service.js')).default;
+          const syncService = new JTLOrderSyncService(this.prisma);
+          const result = await syncService.reconcileStuckFulfillments(clientId);
+          totalFound += result.found;
+          totalQueued += result.queued;
+        } catch (err) {
+          this.logger.warn({
+            jobId,
+            event: 'client_reconcile_failed',
+            clientId,
+            error: err instanceof Error ? err.message : 'Unknown error',
+          });
+        }
+      }
+
+      this.logger.info({
+        jobId,
+        event: 'job_completed',
+        operation: 'stuckFulfillmentReconcile',
+        duration: Date.now() - startTime,
+        clientsProcessed: clientIds.length,
+        totalFound,
+        totalQueued,
+      });
+    } catch (error) {
+      this.logger.error({
+        jobId,
+        event: 'job_failed',
+        operation: 'stuckFulfillmentReconcile',
+        duration: Date.now() - startTime,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
   }
 
   /**

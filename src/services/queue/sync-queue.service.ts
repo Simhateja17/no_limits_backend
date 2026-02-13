@@ -46,7 +46,8 @@ export interface ProductSyncJobData {
 export interface OrderSyncJobData {
   orderId: string;
   origin: 'shopify' | 'woocommerce' | 'nolimits';
-  operation: 'create' | 'update' | 'cancel' | 'fulfill';
+  operation: 'create' | 'update' | 'cancel' | 'fulfill' | 'hold' | 'release_hold' | 'update_tracking';
+  holdReason?: string;
 }
 
 export interface ReturnSyncJobData {

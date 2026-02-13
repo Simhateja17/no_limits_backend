@@ -589,6 +589,39 @@ export class JTLOrderSyncService {
                     processed++;
                 } else {
                     console.log('[JTL-SYNC-DEBUG] ℹ️  State unchanged - not updating');
+
+                    // Even when state is unchanged, check if tracking info has changed (e.g., JTL updated tracking after initial shipment)
+                    if (newState === 'SHIPPED' || oldState === 'SHIPPED') {
+                        try {
+                            const outboundDetail = await jtlService.getOutbound(outboundId);
+                            const currentTracking = (outboundDetail as any).trackingNumber;
+
+                            if (currentTracking && currentTracking !== order.trackingNumber) {
+                                console.log(`[JTL-SYNC-DEBUG] 🔄 Tracking changed for order ${order.id}: ${order.trackingNumber} → ${currentTracking}`);
+
+                                await this.prisma.order.update({
+                                    where: { id: order.id },
+                                    data: {
+                                        trackingNumber: currentTracking,
+                                        lastJtlSync: new Date(),
+                                        lastOperationalUpdateBy: 'JTL',
+                                        lastOperationalUpdateAt: new Date(),
+                                    },
+                                });
+
+                                // Queue tracking update to Shopify
+                                if (order.channelId) {
+                                    await this.queueCommerceTrackingUpdate(order.id);
+                                }
+
+                                processed++;
+                                continue;
+                            }
+                        } catch (e) {
+                            // Silently ignore — tracking check is best-effort
+                        }
+                    }
+
                     // State unchanged - just update lastJtlSync timestamp
                     await this.prisma.order.update({
                         where: { id: order.id },
@@ -906,6 +939,38 @@ export class JTLOrderSyncService {
         } catch (error) {
             this.syncLogger.getLogger().error({
                 event: 'queue_tracking_sync_failed',
+                orderId,
+                error: error instanceof Error ? error.message : 'Unknown error'
+            });
+        }
+    }
+
+    /**
+     * Queue a tracking update to Shopify (uses update_tracking operation, not fulfill)
+     * This updates an existing fulfillment's tracking info rather than creating a new fulfillment
+     */
+    private async queueCommerceTrackingUpdate(orderId: string): Promise<void> {
+        try {
+            const { getQueue, QUEUE_NAMES } = await import('../queue/sync-queue.service.js');
+            const queue = getQueue();
+
+            await queue.enqueue(
+                QUEUE_NAMES.ORDER_SYNC_TO_COMMERCE,
+                {
+                    orderId,
+                    origin: 'nolimits' as const,
+                    operation: 'update_tracking' as const,
+                },
+                {
+                    priority: 1,
+                    singletonKey: `tracking-update-${orderId}`,
+                }
+            );
+
+            console.log(`[JTL-OrderSync] Queued tracking update to commerce for order ${orderId}`);
+        } catch (error) {
+            this.syncLogger.getLogger().error({
+                event: 'queue_tracking_update_failed',
                 orderId,
                 error: error instanceof Error ? error.message : 'Unknown error'
             });
@@ -1322,6 +1387,69 @@ export class JTLOrderSyncService {
         });
 
         return newOrder;
+    }
+
+    /**
+     * Reconcile stuck fulfillments — finds orders that are SHIPPED in FFN but never
+     * got a Shopify fulfillment created (shopifyFulfillmentGid is null).
+     * Re-queues them for commerce sync. Processes in batches of 50.
+     */
+    async reconcileStuckFulfillments(clientId: string): Promise<{ found: number; queued: number }> {
+        const stuckOrders = await this.prisma.order.findMany({
+            where: {
+                clientId,
+                fulfillmentState: 'SHIPPED',
+                shopifyFulfillmentGid: null,
+                isCancelled: false,
+                channel: {
+                    type: 'SHOPIFY',
+                },
+            },
+            select: {
+                id: true,
+                orderId: true,
+            },
+            take: 50,
+        });
+
+        if (stuckOrders.length === 0) {
+            return { found: 0, queued: 0 };
+        }
+
+        console.log(`[JTL-OrderSync] Found ${stuckOrders.length} stuck fulfillments for client ${clientId}`);
+
+        let queued = 0;
+        try {
+            const { getQueue, QUEUE_NAMES } = await import('../queue/sync-queue.service.js');
+            const queue = getQueue();
+
+            for (const order of stuckOrders) {
+                try {
+                    await queue.enqueue(
+                        QUEUE_NAMES.ORDER_SYNC_TO_COMMERCE,
+                        {
+                            orderId: order.id,
+                            origin: 'nolimits' as const,
+                            operation: 'fulfill' as const,
+                        },
+                        {
+                            retryLimit: 2,
+                            retryDelay: 120,
+                            retryBackoff: true,
+                            singletonKey: `reconcile-fulfill-${order.id}`,
+                        }
+                    );
+                    queued++;
+                } catch (err) {
+                    console.error(`[JTL-OrderSync] Failed to queue reconcile for order ${order.id}:`, err);
+                }
+            }
+        } catch (err) {
+            console.error(`[JTL-OrderSync] Failed to access queue for reconciliation:`, err);
+        }
+
+        console.log(`[JTL-OrderSync] Reconciliation: queued ${queued}/${stuckOrders.length} stuck fulfillments`);
+        return { found: stuckOrders.length, queued };
     }
 }
 
