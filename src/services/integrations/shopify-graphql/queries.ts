@@ -127,18 +127,6 @@ export const VARIANT_FRAGMENT = `
           value
           unit
         }
-        length {
-          value
-          unit
-        }
-        width {
-          value
-          unit
-        }
-        height {
-          value
-          unit
-        }
       }
     }
   }

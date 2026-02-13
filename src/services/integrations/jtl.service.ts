@@ -1847,6 +1847,15 @@ export class JTLService {
         return { success: true };
       }
 
+      // Don't auto-sync replacement orders — they must be pushed manually via "Sync to JTL" button
+      if (order.isReplacement && !options?.force) {
+        console.log(`[JTL] Blocking replacement order ${orderId} — must be synced manually`);
+        return { success: false, error: `Order ${orderId} is a replacement order — must be synced manually via "Sync to JTL" button` };
+      }
+      if (order.isReplacement && options?.force) {
+        console.log(`[JTL] Replacement guard bypassed for order ${orderId} — manual sync (force=true)`);
+      }
+
       // Don't sync unpaid orders — block orders on payment hold or with unpaid status
       // When force=true (manual sync from UI), skip payment checks entirely
       if (options?.force) {

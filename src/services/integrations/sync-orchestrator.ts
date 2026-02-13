@@ -747,7 +747,7 @@ export class SyncOrchestrator {
             // Check payment hold and existing JTL outbound before pushing
             const dbOrder = await this.prisma.order.findUnique({
               where: { id: localOrder.localOrderId },
-              select: { isOnHold: true, holdReason: true, jtlOutboundId: true, isCancelled: true },
+              select: { isOnHold: true, holdReason: true, jtlOutboundId: true, isCancelled: true, isReplacement: true },
             });
 
             if (dbOrder?.jtlOutboundId) {
@@ -756,6 +756,8 @@ export class SyncOrchestrator {
               console.log(`[SyncOrchestrator] Skipping JTL push for order ${order.externalOrderId} — on AWAITING_PAYMENT hold`);
             } else if (dbOrder?.isCancelled) {
               console.log(`[SyncOrchestrator] Skipping JTL push for order ${order.externalOrderId} — cancelled`);
+            } else if (dbOrder?.isReplacement) {
+              console.log(`[SyncOrchestrator] Skipping JTL push for order ${order.externalOrderId} — replacement order (must sync manually)`);
             } else {
               await this.pushOrderToJTL(localOrder);
             }
@@ -817,7 +819,7 @@ export class SyncOrchestrator {
             // Check payment hold and existing JTL outbound before pushing
             const dbOrder = await this.prisma.order.findUnique({
               where: { id: localOrder.localOrderId },
-              select: { isOnHold: true, holdReason: true, jtlOutboundId: true, isCancelled: true },
+              select: { isOnHold: true, holdReason: true, jtlOutboundId: true, isCancelled: true, isReplacement: true },
             });
 
             if (dbOrder?.jtlOutboundId) {
@@ -829,6 +831,9 @@ export class SyncOrchestrator {
             } else if (dbOrder?.isCancelled) {
               // Cancelled — skip
               console.log(`[SyncOrchestrator] Skipping JTL push for order ${order.externalOrderId} — cancelled`);
+            } else if (dbOrder?.isReplacement) {
+              // Replacement order — must be synced manually
+              console.log(`[SyncOrchestrator] Skipping JTL push for order ${order.externalOrderId} — replacement order (must sync manually)`);
             } else {
               await this.pushOrderToJTL(localOrder);
             }
@@ -1688,6 +1693,7 @@ export class SyncOrchestrator {
     skippedCancelled: number;
     skippedOnHold: number;
     skippedNoProductMapping: number;
+    skippedReplacement: number;
     errors: string[];
   }> {
     console.log(`\n[JTL] ${'─'.repeat(50)}`);
@@ -1700,6 +1706,7 @@ export class SyncOrchestrator {
       skippedCancelled: 0,
       skippedOnHold: 0,
       skippedNoProductMapping: 0,
+      skippedReplacement: 0,
       errors: [] as string[],
     };
 
@@ -1746,6 +1753,13 @@ export class SyncOrchestrator {
           if (order.isCancelled) {
             console.log(`[JTL] Skipping cancelled order ${order.orderNumber}`);
             result.skippedCancelled++;
+            continue;
+          }
+
+          // 2b. Skip replacement orders — must be synced manually
+          if (order.isReplacement) {
+            console.log(`[JTL] Skipping replacement order ${order.orderNumber} — must be synced manually`);
+            result.skippedReplacement++;
             continue;
           }
 

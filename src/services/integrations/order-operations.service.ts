@@ -385,8 +385,11 @@ export class OrderOperationsService {
                 },
             });
 
-            // Queue FFN sync
-            await this.queueFFNSync(replacementOrder.id);
+            // Replacement orders must NOT auto-sync to FFN — they should only be
+            // pushed manually via the "Sync to JTL" button on the order detail page
+            console.log(
+                `[OrderOps] Replacement order ${replacementOrder.id} created — skipping automatic FFN sync (must be synced manually)`
+            );
 
             console.log(
                 `[OrderOps] Created replacement order ${replacementOrder.id} for ${data.originalOrderId}`

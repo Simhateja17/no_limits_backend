@@ -116,6 +116,25 @@ export class JTLOrderSyncService {
                 return { success: true };
             }
 
+            // Don't auto-sync replacement orders — they must be pushed manually via "Sync to JTL" button
+            if (order.isReplacement && !options?.force) {
+                this.syncLogger.getLogger().info({
+                    event: 'ffn_sync_blocked_replacement',
+                    orderId,
+                    orderNumber: order.orderNumber,
+                    reason: 'Replacement orders must be synced manually',
+                });
+                return { success: false, error: `Order ${order.orderNumber || orderId} is a replacement order — must be synced manually via "Sync to JTL" button` };
+            }
+            if (order.isReplacement && options?.force) {
+                this.syncLogger.getLogger().info({
+                    event: 'ffn_sync_replacement_guard_bypassed',
+                    orderId,
+                    orderNumber: order.orderNumber,
+                    reason: 'manual_sync_force',
+                });
+            }
+
             // Don't sync unpaid orders — block orders on payment hold or with unpaid status
             // When force=true (manual sync from UI), skip payment checks entirely
             if (options?.force) {
@@ -1214,7 +1233,18 @@ export class JTLOrderSyncService {
             stats.ordersLinkedToFFN++;
 
         } else {
-            // Order doesn't exist in FFN - check payment before pushing
+            // Order doesn't exist in FFN - check eligibility before pushing
+
+            // Skip replacement orders — must be synced manually
+            if (newOrder.isReplacement) {
+                this.syncLogger.getLogger().info({
+                    event: 'reconciliation_skipped_replacement',
+                    orderId: newOrder.id,
+                    orderNumber: newOrder.orderNumber,
+                });
+                return;
+            }
+
             const paymentOk = newOrder.paymentStatus &&
                 FFN_ALLOWED_PAYMENT_STATUSES.includes(newOrder.paymentStatus.toLowerCase());
 
