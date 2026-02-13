@@ -33,6 +33,13 @@ import {
   ShopifyRefundLineItem,
 } from './types.js';
 
+/** Extract a useful error message from any thrown value (not just Error instances) */
+function extractErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'string') return error;
+  try { return JSON.stringify(error); } catch { return String(error); }
+}
+
 // Payment hold detection - matching order-sync.service.ts logic
 const SHOPIFY_PAID_STATUSES = ['paid', 'authorized', 'partially_paid'];
 const WOOCOMMERCE_UNPAID_STATUSES = ['pending', 'on-hold'];
@@ -211,7 +218,7 @@ export class SyncOrchestrator {
           results.push({
             externalId: product.externalProductId,
             success: false,
-            error: error instanceof Error ? error.message : 'Unknown error',
+            error: extractErrorMessage(error),
             action: 'failed',
           });
           itemsFailed++;
@@ -228,7 +235,7 @@ export class SyncOrchestrator {
     } catch (error) {
       return {
         success: false,
-        error: error instanceof Error ? error.message : 'Unknown error',
+        error: extractErrorMessage(error),
         syncedAt: new Date(),
         itemsProcessed,
         itemsFailed,
@@ -275,7 +282,7 @@ export class SyncOrchestrator {
           results.push({
             externalId: product.externalProductId,
             success: false,
-            error: error instanceof Error ? error.message : 'Unknown error',
+            error: extractErrorMessage(error),
             action: 'failed',
           });
           itemsFailed++;
@@ -292,7 +299,7 @@ export class SyncOrchestrator {
     } catch (error) {
       return {
         success: false,
-        error: error instanceof Error ? error.message : 'Unknown error',
+        error: extractErrorMessage(error),
         syncedAt: new Date(),
         itemsProcessed,
         itemsFailed,
@@ -765,7 +772,7 @@ export class SyncOrchestrator {
           results.push({
             externalId: order.externalOrderId,
             success: false,
-            error: error instanceof Error ? error.message : 'Unknown error',
+            error: extractErrorMessage(error),
             action: 'failed',
           });
           itemsFailed++;
@@ -782,7 +789,7 @@ export class SyncOrchestrator {
     } catch (error) {
       return {
         success: false,
-        error: error instanceof Error ? error.message : 'Unknown error',
+        error: extractErrorMessage(error),
         syncedAt: new Date(),
         itemsProcessed,
         itemsFailed,
@@ -838,7 +845,7 @@ export class SyncOrchestrator {
           results.push({
             externalId: order.externalOrderId,
             success: false,
-            error: error instanceof Error ? error.message : 'Unknown error',
+            error: extractErrorMessage(error),
             action: 'failed',
           });
           itemsFailed++;
@@ -855,7 +862,7 @@ export class SyncOrchestrator {
     } catch (error) {
       return {
         success: false,
-        error: error instanceof Error ? error.message : 'Unknown error',
+        error: extractErrorMessage(error),
         syncedAt: new Date(),
         itemsProcessed,
         itemsFailed,
@@ -1298,7 +1305,7 @@ export class SyncOrchestrator {
           results.push({
             externalId: refund.refundId,
             success: false,
-            error: error instanceof Error ? error.message : 'Unknown error',
+            error: extractErrorMessage(error),
             action: 'failed',
           });
           itemsFailed++;
@@ -1315,7 +1322,7 @@ export class SyncOrchestrator {
     } catch (error) {
       return {
         success: false,
-        error: error instanceof Error ? error.message : 'Unknown error',
+        error: extractErrorMessage(error),
         syncedAt: new Date(),
         itemsProcessed,
         itemsFailed,
@@ -1644,7 +1651,7 @@ export class SyncOrchestrator {
             notFound++;
           }
         } catch (error) {
-          const errMsg = `Failed to link outbound ${outbound.id}: ${error instanceof Error ? error.message : 'Unknown error'}`;
+          const errMsg = `Failed to link outbound ${outbound.id}: ${extractErrorMessage(error)}`;
           errors.push(errMsg);
           console.error(`[JTL] ${errMsg}`);
         }
@@ -1654,7 +1661,7 @@ export class SyncOrchestrator {
 
       return { linked, alreadyLinked, notFound, errors };
     } catch (error) {
-      const errMsg = `Failed to fetch outbounds from JTL: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      const errMsg = `Failed to fetch outbounds from JTL: ${extractErrorMessage(error)}`;
       console.error(`[JTL] ${errMsg}`);
       errors.push(errMsg);
       return { linked, alreadyLinked, notFound, errors };
@@ -2005,7 +2012,7 @@ export class SyncOrchestrator {
           results.push({
             externalId: update.outboundId,
             success: false,
-            error: error instanceof Error ? error.message : 'Unknown error',
+            error: extractErrorMessage(error),
             action: 'failed',
           });
           itemsFailed++;
@@ -2022,7 +2029,7 @@ export class SyncOrchestrator {
     } catch (error) {
       return {
         success: false,
-        error: error instanceof Error ? error.message : 'Unknown error',
+        error: extractErrorMessage(error),
         syncedAt: new Date(),
         itemsProcessed,
         itemsFailed,
@@ -2072,7 +2079,7 @@ export class SyncOrchestrator {
           results.push({
             externalId: update.id,
             success: false,
-            error: error instanceof Error ? error.message : 'Unknown error',
+            error: extractErrorMessage(error),
             action: 'failed',
           });
           itemsFailed++;
@@ -2089,7 +2096,7 @@ export class SyncOrchestrator {
     } catch (error) {
       return {
         success: false,
-        error: error instanceof Error ? error.message : 'Unknown error',
+        error: extractErrorMessage(error),
         syncedAt: new Date(),
         itemsProcessed,
         itemsFailed,
@@ -2272,7 +2279,7 @@ export class SyncOrchestrator {
           origin: 'JTL',
           targetPlatform: order.channel?.type?.toLowerCase() || 'unknown',
           success: false,
-          errorMessage: error instanceof Error ? error.message : 'Unknown error',
+          errorMessage: extractErrorMessage(error),
         },
       });
     }

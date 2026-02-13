@@ -1360,6 +1360,15 @@ export class OrderSyncService {
                       shopifyFulfillmentOrderStatus: 'CANCELLED',
                     },
                   });
+                } else if (errMsg.includes('not found in Shopify')) {
+                  // Permanent failure — order doesn't exist in Shopify, retrying won't help
+                  console.error(`[OrderSync] Order ${order.id} (external: ${order.externalOrderId}) not found in Shopify — not retrying`);
+                  await this.prisma.order.update({
+                    where: { id: order.id },
+                    data: {
+                      commerceSyncError: `Order not found in Shopify: ${errMsg}`,
+                    },
+                  });
                 } else {
                   throw fulfillError;
                 }

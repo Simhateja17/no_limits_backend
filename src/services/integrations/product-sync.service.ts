@@ -26,6 +26,13 @@ import { generateJobId } from '../../utils/job-id.js';
 
 type Decimal = Prisma.Decimal;
 
+/** Extract a useful error message from any thrown value (not just Error instances) */
+function extractErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'string') return error;
+  try { return JSON.stringify(error); } catch { return String(error); }
+}
+
 // ============= FIELD OWNERSHIP DEFINITIONS =============
 
 /**
@@ -441,7 +448,7 @@ export class ProductSyncService {
         origin,
         externalId,
         duration: Date.now() - startTime,
-        error: error instanceof Error ? error.message : 'Unknown error',
+        error: extractErrorMessage(error),
         stack: error instanceof Error ? error.stack : undefined
       });
 
@@ -449,7 +456,7 @@ export class ProductSyncService {
         success: false,
         action: 'failed',
         productId: '',
-        error: error instanceof Error ? error.message : 'Unknown error',
+        error: extractErrorMessage(error),
       };
     }
   }
@@ -536,7 +543,7 @@ export class ProductSyncService {
         success: false,
         action: 'failed',
         productId: '',
-        error: error instanceof Error ? error.message : 'Unknown error',
+        error: extractErrorMessage(error),
       };
     }
   }
@@ -679,6 +686,7 @@ export class ProductSyncService {
 
         results.push({ platform: channelType, success: true, externalId });
       } catch (error) {
+        const errMsg = extractErrorMessage(error);
         this.logger.error({
           jobId,
           event: 'platform_sync_failed',
@@ -686,7 +694,7 @@ export class ProductSyncService {
           productId,
           sku: product.sku,
           duration: Date.now() - channelStartTime,
-          error: error instanceof Error ? error.message : 'Unknown error',
+          error: errMsg,
           stack: error instanceof Error ? error.stack : undefined
         });
 
@@ -694,7 +702,7 @@ export class ProductSyncService {
           where: { id: productChannel.id },
           data: {
             syncStatus: 'ERROR',
-            lastError: error instanceof Error ? error.message : 'Unknown error',
+            lastError: errMsg,
             lastErrorAt: new Date(),
           },
         });
@@ -702,7 +710,7 @@ export class ProductSyncService {
         results.push({
           platform: channelType,
           success: false,
-          error: error instanceof Error ? error.message : 'Unknown error',
+          error: errMsg,
         });
       }
     }
@@ -745,6 +753,7 @@ export class ProductSyncService {
 
         results.push({ platform: 'jtl', success: true, externalId: jtlId });
       } catch (error) {
+        const errMsg = extractErrorMessage(error);
         this.logger.error({
           jobId,
           event: 'platform_sync_failed',
@@ -752,7 +761,7 @@ export class ProductSyncService {
           productId,
           sku: product.sku,
           duration: Date.now() - jtlStartTime,
-          error: error instanceof Error ? error.message : 'Unknown error',
+          error: errMsg,
           stack: error instanceof Error ? error.stack : undefined
         });
 
@@ -764,7 +773,7 @@ export class ProductSyncService {
         results.push({
           platform: 'jtl',
           success: false,
-          error: error instanceof Error ? error.message : 'Unknown error',
+          error: errMsg,
         });
       }
     }
@@ -895,7 +904,7 @@ export class ProductSyncService {
       console.log(`[ProductSync] Stock synced successfully for product ${productId} to ${productChannel.channel.type}`);
       return { success: true };
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      const errorMessage = extractErrorMessage(error);
       console.error(`[ProductSync] Stock sync failed for product ${productId}:`, errorMessage);
       return { success: false, error: errorMessage };
     }
@@ -1558,7 +1567,7 @@ export class ProductSyncService {
           where: { id: job.id },
           data: {
             status: job.attempts >= 2 ? 'failed' : 'pending',
-            lastError: error instanceof Error ? error.message : 'Unknown error',
+            lastError: extractErrorMessage(error),
             scheduledFor: new Date(Date.now() + 5 * 60 * 1000), // Retry in 5 minutes
           },
         });
@@ -2270,7 +2279,7 @@ export class ProductSyncService {
             result.updated++;
             console.log(`[ProductSync] Updated product ${localProduct.sku} with jtlProductId: ${jtlProduct.jfsku}`);
           } catch (error) {
-            result.errors.push(`Failed to update ${localProduct.sku}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+            result.errors.push(`Failed to update ${localProduct.sku}: ${extractErrorMessage(error)}`);
           }
         }
       }
@@ -2279,7 +2288,7 @@ export class ProductSyncService {
       return result;
     } catch (error) {
       console.error(`[ProductSync] Error pulling products from JTL:`, error);
-      result.errors.push(error instanceof Error ? error.message : 'Unknown error');
+      result.errors.push(extractErrorMessage(error));
       return result;
     }
   }
@@ -2460,7 +2469,7 @@ export class ProductSyncService {
           console.log(`[ProductSync] Imported new product: ${sku} (${jtlProduct.jfsku})`);
         } catch (error) {
           result.failed++;
-          const errorMsg = `Failed to import ${sku}: ${error instanceof Error ? error.message : 'Unknown error'}`;
+          const errorMsg = `Failed to import ${sku}: ${extractErrorMessage(error)}`;
           result.errors.push(errorMsg);
           console.error(`[ProductSync] ${errorMsg}`);
         }
@@ -2472,7 +2481,7 @@ export class ProductSyncService {
       return result;
     } catch (error) {
       console.error(`[ProductSync] Error importing products from JTL:`, error);
-      result.errors.push(error instanceof Error ? error.message : 'Unknown error');
+      result.errors.push(extractErrorMessage(error));
       return result;
     }
   }

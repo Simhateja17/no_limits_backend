@@ -876,6 +876,10 @@ export class ShopifyGraphQLService {
       orderId: toGid('Order', orderId),
     });
 
+    if (!data.order) {
+      throw new Error(`Order ${orderId} not found in Shopify — it may have been deleted or the external ID is invalid`);
+    }
+
     return data.order.fulfillmentOrders.edges.map(e => ({
       ...e.node,
       lineItems: e.node.lineItems?.edges?.map(li => li.node) || [],
@@ -1848,6 +1852,10 @@ export class ShopifyGraphQLService {
       shippingFullRefund: calculation.shipping?.full_refund,
       shippingAmount: calculation.shipping?.amount,
     });
+
+    if (!data.order) {
+      throw new Error(`Order ${orderId} not found in Shopify — cannot calculate suggested refund`);
+    }
 
     return {
       shipping: { amount: data.order.suggestedRefund.shipping.amount },
