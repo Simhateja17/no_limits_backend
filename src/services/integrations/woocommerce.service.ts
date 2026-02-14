@@ -335,6 +335,63 @@ export class WooCommerceService {
     );
   }
 
+  /**
+   * Normalize image payloads so WooCommerce always receives the expected types.
+   */
+  private normalizeProductImages(
+    images: unknown
+  ): Array<{ id?: number; src?: string; alt?: string }> | undefined {
+    if (!Array.isArray(images)) return undefined;
+
+    const normalized: Array<{ id?: number; src?: string; alt?: string }> = [];
+
+    for (const image of images) {
+      if (!image || typeof image !== 'object') continue;
+      const rawImage = image as Record<string, unknown>;
+      const normalizedImage: { id?: number; src?: string; alt?: string } = {};
+
+      if (typeof rawImage.id === 'number' && Number.isFinite(rawImage.id)) {
+        normalizedImage.id = rawImage.id;
+      }
+
+      if (typeof rawImage.src === 'string') {
+        const src = rawImage.src.trim();
+        if (src) {
+          normalizedImage.src = src;
+        }
+      }
+
+      // WooCommerce requires alt to be a string when present.
+      if ('alt' in rawImage || normalizedImage.src) {
+        normalizedImage.alt = typeof rawImage.alt === 'string' ? rawImage.alt : '';
+      }
+
+      if (normalizedImage.id !== undefined || normalizedImage.src) {
+        normalized.push(normalizedImage);
+      }
+    }
+
+    return normalized.length > 0 ? normalized : undefined;
+  }
+
+  /**
+   * Normalize outgoing product payload fields with strict API typing.
+   */
+  private normalizeProductPayload<T extends Record<string, unknown>>(payload: T): T {
+    const normalizedPayload: Record<string, unknown> = { ...payload };
+
+    if ('images' in normalizedPayload) {
+      const normalizedImages = this.normalizeProductImages(normalizedPayload.images);
+      if (normalizedImages) {
+        normalizedPayload.images = normalizedImages;
+      } else {
+        delete normalizedPayload.images;
+      }
+    }
+
+    return normalizedPayload as T;
+  }
+
   // ============= PRODUCT MUTATIONS (PUSH TO WOOCOMMERCE) =============
 
   /**
@@ -364,11 +421,13 @@ export class WooCommerceService {
       options?: string[];
     }>;
   }): Promise<WooCommerceProduct> {
+    const normalizedProduct = this.normalizeProductPayload(product);
+
     return this.request<WooCommerceProduct>(
       '/products',
       {
         method: 'POST',
-        body: JSON.stringify(product),
+        body: JSON.stringify(normalizedProduct),
       }
     );
   }
@@ -393,11 +452,13 @@ export class WooCommerceService {
     categories?: Array<{ id: number }>;
     images?: Array<{ id?: number; src?: string; alt?: string }>;
   }): Promise<WooCommerceProduct> {
+    const normalizedUpdates = this.normalizeProductPayload(updates);
+
     return this.request<WooCommerceProduct>(
       `/products/${productId}`,
       {
         method: 'PUT',
-        body: JSON.stringify(updates),
+        body: JSON.stringify(normalizedUpdates),
       }
     );
   }

@@ -837,6 +837,9 @@ export class ProductSyncService {
       ),
       syncedPlatforms: results.filter(r => r.success).map(r => r.platform),
       skippedPlatforms: skipPlatforms,
+      error: allSuccess
+        ? undefined
+        : results.find(r => !r.success)?.error || 'One or more platform sync operations failed',
     };
   }
 
@@ -1093,6 +1096,37 @@ export class ProductSyncService {
   }
 
   /**
+   * Build safe image payloads for commerce APIs.
+   * Ensures `src` and `alt` are strings and removes invalid/duplicate URLs.
+   */
+  private buildPlatformImages(
+    images: Array<{ url?: unknown; altText?: unknown }> | null | undefined,
+    primaryImageUrl: unknown
+  ): Array<{ src: string; alt: string }> {
+    const normalizedImages: Array<{ src: string; alt: string }> = [];
+    const seen = new Set<string>();
+
+    for (const image of images || []) {
+      if (typeof image?.url !== 'string') continue;
+      const src = image.url.trim();
+      if (!src || seen.has(src)) continue;
+
+      const alt = typeof image.altText === 'string' ? image.altText : '';
+      normalizedImages.push({ src, alt });
+      seen.add(src);
+    }
+
+    if (typeof primaryImageUrl === 'string') {
+      const primarySrc = primaryImageUrl.trim();
+      if (primarySrc && !seen.has(primarySrc)) {
+        normalizedImages.unshift({ src: primarySrc, alt: '' });
+      }
+    }
+
+    return normalizedImages;
+  }
+
+  /**
    * Push product to Shopify
    */
   private async pushToShopify(
@@ -1183,10 +1217,7 @@ export class ProductSyncService {
 
     // Images
     if (!fieldsToSync || fieldsToSync.includes('imageUrl') || fieldsToSync.includes('images')) {
-      const images = product.images?.map(img => ({ src: img.url, alt: img.altText || '' })) || [];
-      if (product.imageUrl && !images.some(img => img.src === product.imageUrl)) {
-        images.unshift({ src: product.imageUrl, alt: '' });
-      }
+      const images = this.buildPlatformImages(product.images, product.imageUrl);
       if (images.length > 0) {
         shopifyData.images = images;
       }
@@ -1297,10 +1328,7 @@ export class ProductSyncService {
 
     // Images
     if (!fieldsToSync || fieldsToSync.includes('imageUrl') || fieldsToSync.includes('images')) {
-      const images = product.images?.map(img => ({ src: img.url, alt: img.altText || '' })) || [];
-      if (product.imageUrl && !images.some(img => img.src === product.imageUrl)) {
-        images.unshift({ src: product.imageUrl, alt: '' });
-      }
+      const images = this.buildPlatformImages(product.images, product.imageUrl);
       if (images.length > 0) {
         wooData.images = images;
       }
