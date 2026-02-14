@@ -1183,9 +1183,9 @@ export class ProductSyncService {
 
     // Images
     if (!fieldsToSync || fieldsToSync.includes('imageUrl') || fieldsToSync.includes('images')) {
-      const images = product.images?.map(img => ({ src: img.url, alt: img.altText })) || [];
+      const images = product.images?.map(img => ({ src: img.url, alt: img.altText || '' })) || [];
       if (product.imageUrl && !images.some(img => img.src === product.imageUrl)) {
-        images.unshift({ src: product.imageUrl, alt: null });
+        images.unshift({ src: product.imageUrl, alt: '' });
       }
       if (images.length > 0) {
         shopifyData.images = images;
@@ -1297,9 +1297,9 @@ export class ProductSyncService {
 
     // Images
     if (!fieldsToSync || fieldsToSync.includes('imageUrl') || fieldsToSync.includes('images')) {
-      const images = product.images?.map(img => ({ src: img.url, alt: img.altText })) || [];
+      const images = product.images?.map(img => ({ src: img.url, alt: img.altText || '' })) || [];
       if (product.imageUrl && !images.some(img => img.src === product.imageUrl)) {
-        images.unshift({ src: product.imageUrl, alt: null });
+        images.unshift({ src: product.imageUrl, alt: '' });
       }
       if (images.length > 0) {
         wooData.images = images;
