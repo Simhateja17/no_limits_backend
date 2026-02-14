@@ -22,6 +22,7 @@ import { PrismaClient } from '@prisma/client';
 import { getEncryptionService } from '../encryption.service.js';
 import { Logger } from '../../utils/logger.js';
 import { generateJobId } from '../../utils/job-id.js';
+import { JTLTokenManager } from './jtl-token-manager.js';
 
 interface JTLTokenResponse {
   access_token: string;
@@ -294,7 +295,8 @@ export class JTLService {
   }
 
   /**
-   * Ensure we have a valid access token
+   * Ensure we have a valid access token.
+   * Routes through JTLTokenManager to prevent concurrent refresh races.
    */
   private async ensureValidToken(): Promise<void> {
     // If token is expired or will expire in 5 minutes, refresh it
@@ -305,17 +307,22 @@ export class JTLService {
         clientId: this.internalClientId
       });
 
-      // If we have prisma and clientId, persist the new tokens to database
       if (this.prisma && this.internalClientId) {
-        const startTime = Date.now();
-        await this.refreshAndPersistToken(this.internalClientId, this.prisma);
-
-        this.logger.debug({
-          event: 'token_refresh_completed',
-          clientId: this.internalClientId,
-          duration: Date.now() - startTime,
-          persisted: true
-        });
+        // Use centralized TokenManager to prevent concurrent refresh races
+        const manager = JTLTokenManager.getInstance(this.internalClientId);
+        const tokens = await manager.refreshToken(
+          {
+            clientId: this.credentials.clientId,
+            clientSecret: this.credentials.clientSecret,
+            refreshToken: this.credentials.refreshToken!,
+            environment: this.credentials.environment as 'sandbox' | 'production',
+          },
+          this.prisma,
+        );
+        // Update in-memory state from manager result
+        this.accessToken = tokens.accessToken;
+        this.tokenExpiresAt = tokens.expiresAt;
+        this.credentials.refreshToken = tokens.refreshToken;
       } else {
         this.logger.warn({
           event: 'token_refresh_not_persisted',
@@ -335,12 +342,15 @@ export class JTLService {
   }
 
   /**
-   * Make an authenticated request to JTL API
+   * Make an authenticated request to JTL API.
+   * On 401, re-reads the latest token from DB (another instance may have
+   * refreshed it) and retries once.
    */
   private async request<T>(
     endpoint: string,
     options: RequestInit = {},
-    jobId?: string
+    jobId?: string,
+    isRetry = false,
   ): Promise<T> {
     const requestJobId = jobId || generateJobId('jtl-req');
     const startTime = Date.now();
@@ -363,6 +373,29 @@ export class JTLService {
 
     if (!response.ok) {
       const error = await response.text();
+
+      // 401 retry: another instance may have refreshed the token while we were mid-request
+      if (response.status === 401 && !isRetry && this.prisma && this.internalClientId) {
+        this.logger.warn({
+          jobId: requestJobId,
+          event: 'api_401_retry',
+          method,
+          url,
+          clientId: this.internalClientId,
+        });
+
+        const manager = JTLTokenManager.getInstance(this.internalClientId);
+        const tokens = await manager.getLatestTokens(this.prisma);
+        if (tokens) {
+          this.accessToken = tokens.accessToken;
+          this.tokenExpiresAt = tokens.expiresAt;
+          this.credentials.refreshToken = tokens.refreshToken;
+        }
+
+        // Retry once — ensureValidToken() in the retry will trigger a fresh
+        // refresh through the mutex if the DB token is also expired
+        return this.request<T>(endpoint, options, jobId, true);
+      }
 
       this.logger.error({
         jobId: requestJobId,

@@ -9,6 +9,7 @@ import { SyncOrchestrator } from './sync-orchestrator.js';
 import { SyncResult } from './types.js';
 import { getEncryptionService } from '../encryption.service.js';
 import { JTLService } from './jtl.service.js';
+import { JTLTokenManager } from './jtl-token-manager.js';
 import { StockSyncService } from './stock-sync.service.js';
 import { notificationService } from '../notification.service.js';
 import { Logger } from '../../utils/logger.js';
@@ -1000,18 +1001,18 @@ export class SyncScheduler {
           clientId: config.clientId_fk
         });
 
-        const jtlService = new JTLService({
-          clientId: config.clientId,
-          clientSecret: encryptionService.safeDecrypt(config.clientSecret),
-          accessToken: config.accessToken ? encryptionService.safeDecrypt(config.accessToken) : undefined,
-          refreshToken: encryptionService.safeDecrypt(config.refreshToken),
-          tokenExpiresAt: config.tokenExpiresAt ?? undefined,
-          environment: config.environment as 'sandbox' | 'production',
-          fulfillerId: config.fulfillerId,
-          warehouseId: config.warehouseId,
-        }, this.prisma, config.clientId_fk);
-
-        await jtlService.refreshAndPersistToken(config.clientId_fk, this.prisma);
+        // Route through centralized TokenManager to prevent races with
+        // in-flight API calls that may also be refreshing
+        const manager = JTLTokenManager.getInstance(config.clientId_fk);
+        await manager.refreshToken(
+          {
+            clientId: config.clientId,
+            clientSecret: encryptionService.safeDecrypt(config.clientSecret),
+            refreshToken: encryptionService.safeDecrypt(config.refreshToken),
+            environment: config.environment as 'sandbox' | 'production',
+          },
+          this.prisma,
+        );
 
         this.logger.debug({
           jobId,
