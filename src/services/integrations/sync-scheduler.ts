@@ -10,6 +10,7 @@ import { SyncResult } from './types.js';
 import { getEncryptionService } from '../encryption.service.js';
 import { JTLService } from './jtl.service.js';
 import { StockSyncService } from './stock-sync.service.js';
+import { notificationService } from '../notification.service.js';
 import { Logger } from '../../utils/logger.js';
 import { generateJobId } from '../../utils/job-id.js';
 import { getQueue, QUEUE_NAMES, OrderSyncJobData } from '../queue/sync-queue.service.js';
@@ -95,6 +96,8 @@ interface ChannelWithConfig {
   apiClientId?: string | null;
   apiClientSecret?: string | null;
   client: {
+    id: string;
+    companyName: string;
     jtlConfig?: {
       clientId: string;
       clientSecret: string;
@@ -103,6 +106,7 @@ interface ChannelWithConfig {
       warehouseId: string;
       fulfillerId: string;
       environment: string;
+      clientId_fk: string;
     } | null;
   };
 }
@@ -409,27 +413,32 @@ export class SyncScheduler {
 
     try {
       // Find orders that are paid but never pushed to FFN
-      // Uses raw SQL because we need complex OR logic on hold conditions
-      const unsyncedOrders = await this.prisma.$queryRawUnsafe<
-        Array<{ id: string; orderId: string; orderNumber: string | null; paymentStatus: string }>
-      >(`
-        SELECT o."id", o."orderId", o."orderNumber", o."paymentStatus"
-        FROM "orders" o
-        JOIN "channels" c ON o.channel_id = c.id
-        WHERE o."jtlOutboundId" IS NULL
-          AND o."paymentStatus" IN (${SAFE_PAYMENT_STATUSES.map((_, i) => `$${i + 1}`).join(', ')})
-          AND o."isReplacement" = false
-          AND o."isCancelled" = false
-          AND (
-            o."isOnHold" = false
-            OR o."holdReason" NOT IN ('AWAITING_PAYMENT', 'SHIPPING_METHOD_MISMATCH')
-            OR o."paymentHoldOverride" = true
-          )
-          AND c."isActive" = true
-          AND c."syncEnabled" = true
-        ORDER BY o."createdAt" ASC
-        LIMIT 50
-      `, ...SAFE_PAYMENT_STATUSES);
+      const unsyncedOrders = await this.prisma.order.findMany({
+        where: {
+          jtlOutboundId: null,
+          paymentStatus: { in: SAFE_PAYMENT_STATUSES },
+          isReplacement: false,
+          isCancelled: false,
+          OR: [
+            { isOnHold: false },
+            { holdReason: { notIn: ['AWAITING_PAYMENT', 'SHIPPING_METHOD_MISMATCH'] } },
+            { paymentHoldOverride: true },
+          ],
+          channel: {
+            isActive: true,
+            syncEnabled: true,
+          },
+        },
+        select: {
+          id: true,
+          orderId: true,
+          orderNumber: true,
+          paymentStatus: true,
+          clientId: true,
+        },
+        orderBy: { createdAt: 'asc' },
+        take: 50,
+      });
 
       stats.found = unsyncedOrders.length;
 
@@ -504,6 +513,38 @@ export class SyncScheduler {
         duration: Date.now() - startTime,
         ...stats,
       });
+
+      // Track per-client cron job status
+      const clientGroups = new Map<string, { found: number; queued: number; skipped: number }>();
+      for (const order of unsyncedOrders) {
+        if (!clientGroups.has(order.clientId)) {
+          clientGroups.set(order.clientId, { found: 0, queued: 0, skipped: 0 });
+        }
+        clientGroups.get(order.clientId)!.found++;
+      }
+      const duration = Date.now() - startTime;
+      for (const [clientId, clientStats] of clientGroups) {
+        await this.updateCronJobStatus('paidOrderFFNSync', clientId, {
+          success: true,
+          duration,
+          details: clientStats,
+        });
+      }
+      // If no orders found, update for all clients with active channels
+      if (unsyncedOrders.length === 0) {
+        const activeClients = await this.prisma.channel.findMany({
+          where: { isActive: true, syncEnabled: true },
+          select: { clientId: true },
+          distinct: ['clientId'],
+        });
+        for (const { clientId } of activeClients) {
+          await this.updateCronJobStatus('paidOrderFFNSync', clientId, {
+            success: true,
+            duration,
+            details: { found: 0, queued: 0, skipped: 0 },
+          });
+        }
+      }
     } catch (error) {
       this.logger.error({
         jobId,
@@ -551,17 +592,30 @@ export class SyncScheduler {
       let totalQueued = 0;
 
       for (const clientId of clientIds) {
+        const clientStart = Date.now();
         try {
           const JTLOrderSyncService = (await import('./jtl-order-sync.service.js')).default;
           const syncService = new JTLOrderSyncService(this.prisma);
           const result = await syncService.reconcileStuckFulfillments(clientId);
           totalFound += result.found;
           totalQueued += result.queued;
+
+          await this.updateCronJobStatus('stuckFulfillmentReconcile', clientId, {
+            success: true,
+            duration: Date.now() - clientStart,
+            details: { found: result.found, queued: result.queued },
+          });
         } catch (err) {
           this.logger.warn({
             jobId,
             event: 'client_reconcile_failed',
             clientId,
+            error: err instanceof Error ? err.message : 'Unknown error',
+          });
+
+          await this.updateCronJobStatus('stuckFulfillmentReconcile', clientId, {
+            success: false,
+            duration: Date.now() - clientStart,
             error: err instanceof Error ? err.message : 'Unknown error',
           });
         }
@@ -616,6 +670,7 @@ export class SyncScheduler {
           orderId: true,
           orderNumber: true,
           commerceSyncError: true,
+          clientId: true,
         },
         take: 20, // Batch limit to keep load light
         orderBy: { updatedAt: 'asc' }, // Oldest first
@@ -695,6 +750,20 @@ export class SyncScheduler {
         enqueued,
         skipped,
       });
+
+      // Track per-client status — group stuck orders by clientId
+      const clientGroups = new Map<string, number>();
+      for (const order of stuckOrders) {
+        clientGroups.set(order.clientId, (clientGroups.get(order.clientId) || 0) + 1);
+      }
+      const duration = Date.now() - startTime;
+      for (const [clientId, count] of clientGroups) {
+        await this.updateCronJobStatus('commerceReconcile', clientId, {
+          success: true,
+          duration,
+          details: { stuckOrders: count, enqueued, skipped },
+        });
+      }
     } catch (error) {
       this.logger.error({
         jobId,
@@ -724,15 +793,30 @@ export class SyncScheduler {
     try {
       const result = await this.stockSyncService.syncStockForAllClients();
 
+      const duration = Date.now() - startTime;
       this.logger.info({
         jobId,
         event: 'job_completed',
         operation: 'stockSync',
-        duration: Date.now() - startTime,
+        duration,
         clientsProcessed: result.clientsProcessed,
         productsUpdated: result.totalProductsUpdated,
         productsFailed: result.totalProductsFailed
       });
+
+      // Track per-client cron job status
+      for (const [clientId, clientResult] of result.results) {
+        await this.updateCronJobStatus('stockSync', clientId, {
+          success: clientResult.success,
+          duration,
+          details: {
+            productsUpdated: clientResult.productsUpdated,
+            productsUnchanged: clientResult.productsUnchanged,
+            productsFailed: clientResult.productsFailed,
+          },
+          error: clientResult.errors.length > 0 ? clientResult.errors[0] : undefined,
+        });
+      }
     } catch (error) {
       this.logger.error({
         jobId,
@@ -762,15 +846,33 @@ export class SyncScheduler {
     try {
       const result = await this.stockSyncService.pollInboundsAndSyncForAllClients();
 
+      const duration = Date.now() - startTime;
       this.logger.info({
         jobId,
         event: 'job_completed',
         operation: 'inboundPoll',
-        duration: Date.now() - startTime,
+        duration,
         clientsProcessed: result.clientsProcessed,
         inboundsProcessed: result.totalInboundsProcessed,
         stockSyncsTriggered: result.stockSyncsTriggered
       });
+
+      // Track aggregate status for all active JTL clients
+      const activeClients = await this.prisma.client.findMany({
+        where: { jtlConfig: { isActive: true } },
+        select: { id: true },
+      });
+      for (const { id: clientId } of activeClients) {
+        await this.updateCronJobStatus('inboundPoll', clientId, {
+          success: true,
+          duration,
+          details: {
+            clientsProcessed: result.clientsProcessed,
+            inboundsProcessed: result.totalInboundsProcessed,
+            stockSyncsTriggered: result.stockSyncsTriggered,
+          },
+        });
+      }
     } catch (error) {
       this.logger.error({
         jobId,
@@ -917,6 +1019,11 @@ export class SyncScheduler {
           clientId: config.clientId_fk
         });
         success++;
+
+        await this.updateCronJobStatus('tokenRefresh', config.clientId_fk, {
+          success: true,
+          duration: Date.now() - startTime,
+        });
       } catch (error) {
         this.logger.error({
           jobId,
@@ -926,6 +1033,26 @@ export class SyncScheduler {
           stack: error instanceof Error ? error.stack : undefined
         });
         failed++;
+
+        // Notify the client about refresh failure
+        try {
+          const client = await this.prisma.client.findUnique({
+            where: { id: config.clientId_fk },
+            select: { companyName: true },
+          });
+          await notificationService.createSyncErrorNotification({
+            clientId: config.clientId_fk,
+            clientName: client?.companyName || config.clientId_fk,
+            errorType: 'JTL',
+            errorMessage: `JTL token refresh failed: ${error instanceof Error ? error.message : 'Unknown error'}. Sync may stop soon if not resolved.`,
+          });
+        } catch { /* don't let notification failure break the refresh loop */ }
+
+        await this.updateCronJobStatus('tokenRefresh', config.clientId_fk, {
+          success: false,
+          duration: Date.now() - startTime,
+          error: error instanceof Error ? error.message : 'Unknown error',
+        });
       }
     }
 
@@ -1271,6 +1398,26 @@ export class SyncScheduler {
           duration: Date.now() - startTime,
           error: errorMessage
         });
+
+        // Persist revocation to DB so it survives server restarts
+        try {
+          if (channel.client.jtlConfig?.clientId_fk) {
+            await this.prisma.jtlConfig.update({
+              where: { clientId_fk: channel.client.jtlConfig.clientId_fk },
+              data: { isActive: false },
+            });
+          }
+        } catch { /* don't let DB update failure break error handling */ }
+
+        // Notify the client about token revocation
+        try {
+          await notificationService.createSyncErrorNotification({
+            clientId: channel.client.id,
+            clientName: channel.client.companyName,
+            errorType: 'JTL',
+            errorMessage: 'JTL refresh token expired or revoked. All fulfillment sync is stopped. Please re-authorize JTL in Settings → Integrations.',
+          });
+        } catch { /* don't let notification failure break error handling */ }
       } else {
         state.lastError = errorMessage;
         this.logger.error({
@@ -1634,6 +1781,39 @@ export class SyncScheduler {
    */
   getChannelSyncStatus(channelId: string): ChannelSyncState | undefined {
     return this.channelStates.get(channelId);
+  }
+
+  /**
+   * Persist the latest run status of a cron job per client.
+   * Uses upsert on @@unique([clientId, jobName]) — always stores only the most recent run.
+   */
+  private async updateCronJobStatus(jobName: string, clientId: string, result: {
+    success: boolean;
+    duration: number;
+    details?: Record<string, unknown>;
+    error?: string;
+  }): Promise<void> {
+    try {
+      await this.prisma.cronJobStatus.upsert({
+        where: { clientId_jobName: { clientId, jobName } },
+        create: {
+          clientId,
+          jobName,
+          lastRunAt: new Date(),
+          success: result.success,
+          duration: result.duration,
+          details: result.details || undefined,
+          error: result.error || null,
+        },
+        update: {
+          lastRunAt: new Date(),
+          success: result.success,
+          duration: result.duration,
+          details: result.details || undefined,
+          error: result.error || null,
+        },
+      });
+    } catch { /* don't let status tracking break the actual job */ }
   }
 
   /**

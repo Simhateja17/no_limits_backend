@@ -241,6 +241,8 @@ model Client {
   notifications             Notification[]
   tasks                     Task[]
   
+  cronJobStatuses       CronJobStatus[]
+
   @@map("clients")
 }
 
@@ -1703,4 +1705,22 @@ model PipelineStep {
   @@unique([pipelineId, stepNumber])
   @@index([status])
   @@map("pipeline_steps")
+}
+
+// Cron Job Status — tracks last run of each background job per client
+model CronJobStatus {
+  id          String   @id @default(cuid())
+  clientId    String   @map("client_id")
+  jobName     String   @map("job_name")
+  lastRunAt   DateTime @map("last_run_at")
+  success     Boolean
+  duration    Int      // milliseconds
+  details     Json?    // job-specific stats (e.g. { found: 5, queued: 3, skipped: 2 })
+  error       String?
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  client      Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@unique([clientId, jobName])
+  @@map("cron_job_status")
 }

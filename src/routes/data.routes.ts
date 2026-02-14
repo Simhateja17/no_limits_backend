@@ -4080,7 +4080,13 @@ router.get('/health-status', async (req: Request, res: Response) => {
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
       .slice(0, 20);
 
-    // 5. LAST SYNC JOB
+    // 5. CRON JOB STATUSES (per-client)
+    const cronJobStatuses = await prisma.cronJobStatus.findMany({
+      where: { clientId },
+      orderBy: { lastRunAt: 'desc' },
+    });
+
+    // 6. LAST SYNC JOB
     const lastSyncJob = await prisma.syncJob.findFirst({
       where: { channel: { clientId } },
       orderBy: { startedAt: 'desc' },
@@ -4125,6 +4131,14 @@ router.get('/health-status', async (req: Request, res: Response) => {
           })),
         },
         recentErrors,
+        cronJobs: cronJobStatuses.map(job => ({
+          jobName: job.jobName,
+          lastRunAt: job.lastRunAt.toISOString(),
+          success: job.success,
+          duration: job.duration,
+          details: job.details,
+          error: job.error,
+        })),
         lastSyncJob: lastSyncJob || null,
         generatedAt: now.toISOString(),
       },
