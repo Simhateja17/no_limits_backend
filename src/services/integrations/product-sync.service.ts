@@ -1099,6 +1099,15 @@ export class ProductSyncService {
    * Build safe image payloads for commerce APIs.
    * Ensures `src` and `alt` are strings and removes invalid/duplicate URLs.
    */
+  private static isValidImageUrl(url: string): boolean {
+    try {
+      const parsed = new URL(url);
+      return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+    } catch {
+      return false;
+    }
+  }
+
   private buildPlatformImages(
     images: Array<{ url?: unknown; altText?: unknown }> | null | undefined,
     primaryImageUrl: unknown
@@ -1109,7 +1118,7 @@ export class ProductSyncService {
     for (const image of images || []) {
       if (typeof image?.url !== 'string') continue;
       const src = image.url.trim();
-      if (!src || seen.has(src)) continue;
+      if (!src || seen.has(src) || !ProductSyncService.isValidImageUrl(src)) continue;
 
       const alt = typeof image.altText === 'string' ? image.altText : '';
       normalizedImages.push({ src, alt });
@@ -1118,7 +1127,7 @@ export class ProductSyncService {
 
     if (typeof primaryImageUrl === 'string') {
       const primarySrc = primaryImageUrl.trim();
-      if (primarySrc && !seen.has(primarySrc)) {
+      if (primarySrc && !seen.has(primarySrc) && ProductSyncService.isValidImageUrl(primarySrc)) {
         normalizedImages.unshift({ src: primarySrc, alt: '' });
       }
     }
@@ -1336,16 +1345,31 @@ export class ProductSyncService {
 
     if (productChannel.externalProductId) {
       // Update existing
-      const result = await wooService.updateProduct(
-        parseInt(productChannel.externalProductId),
-        wooData
-      );
-      return String(result.id);
+      try {
+        const result = await wooService.updateProduct(
+          parseInt(productChannel.externalProductId),
+          wooData
+        );
+        return String(result.id);
+      } catch (error: unknown) {
+        // If the error is about invalid images, retry without images
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        if (errorMsg.includes('invalid_image_id') && wooData.images) {
+          this.logger.warn({ event: 'woo_image_retry_without_images', sku: product.sku, error: errorMsg });
+          delete wooData.images;
+          const result = await wooService.updateProduct(
+            parseInt(productChannel.externalProductId!),
+            wooData
+          );
+          return String(result.id);
+        }
+        throw error;
+      }
     } else {
       // Create new
       wooData.type = 'simple';
       wooData.status = product.isActive ? 'publish' : 'draft';
-      
+
       const result = await wooService.createProduct(wooData as any);
       return String(result.id);
     }
