@@ -891,7 +891,8 @@ export class JTLOrderSyncService {
                 quantity: item.quantity,
                 unitPrice: item.unitPrice ? parseFloat(item.unitPrice.toString()) : 0,
             })),
-            shippingType: 'Standard',
+            shippingMethodId: order.jtlShippingMethodId || undefined,
+            shippingType: !order.jtlShippingMethodId ? 'Standard' : undefined,
             priority: order.priorityLevel || 0,
             note: order.warehouseNotes || order.notes || undefined,
             attributes: order.tags?.length
