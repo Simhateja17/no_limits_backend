@@ -40,9 +40,11 @@ export async function getShippingMethods(req: Request, res: Response) {
           data: shippingMethods,
         });
       }
+      // No JTL config → return empty, don't fall through to global
+      return res.json({ success: true, data: [] });
     }
-    
-    // For ADMIN/EMPLOYEE or clients without JTL config, return all (or all active)
+
+    // For ADMIN/EMPLOYEE, return all (or all active)
     const shippingMethods = activeOnly === 'true'
       ? await shippingMethodService.getActiveShippingMethods()
       : await shippingMethodService.getAllShippingMethods();
