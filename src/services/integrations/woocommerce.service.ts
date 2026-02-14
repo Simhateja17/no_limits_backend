@@ -381,11 +381,16 @@ export class WooCommerceService {
     const normalizedPayload: Record<string, unknown> = { ...payload };
 
     if ('images' in normalizedPayload) {
-      const normalizedImages = this.normalizeProductImages(normalizedPayload.images);
-      if (normalizedImages) {
-        normalizedPayload.images = normalizedImages;
+      // Explicitly sending [] means "clear all images" — preserve it
+      if (Array.isArray(normalizedPayload.images) && normalizedPayload.images.length === 0) {
+        normalizedPayload.images = [];
       } else {
-        delete normalizedPayload.images;
+        const normalizedImages = this.normalizeProductImages(normalizedPayload.images);
+        if (normalizedImages) {
+          normalizedPayload.images = normalizedImages;
+        } else {
+          delete normalizedPayload.images;
+        }
       }
     }
 

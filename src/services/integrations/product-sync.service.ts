@@ -1345,25 +1345,30 @@ export class ProductSyncService {
 
     if (productChannel.externalProductId) {
       // Update existing
+      const wooProductId = parseInt(productChannel.externalProductId);
       try {
-        const result = await wooService.updateProduct(
-          parseInt(productChannel.externalProductId),
-          wooData
-        );
+        const result = await wooService.updateProduct(wooProductId, wooData);
         return String(result.id);
       } catch (error: unknown) {
-        // If the error is about invalid images, retry without images
         const errorMsg = error instanceof Error ? error.message : String(error);
-        if (errorMsg.includes('invalid_image_id') && wooData.images) {
-          this.logger.warn({ event: 'woo_image_retry_without_images', sku: product.sku, error: errorMsg });
-          delete wooData.images;
-          const result = await wooService.updateProduct(
-            parseInt(productChannel.externalProductId!),
-            wooData
-          );
+        if (!errorMsg.includes('invalid_image_id')) throw error;
+
+        // Image error: retry without our images
+        this.logger.warn({ event: 'woo_image_retry_without_images', sku: product.sku, error: errorMsg });
+        delete wooData.images;
+        try {
+          const result = await wooService.updateProduct(wooProductId, wooData);
+          return String(result.id);
+        } catch (retryError: unknown) {
+          const retryMsg = retryError instanceof Error ? retryError.message : String(retryError);
+          if (!retryMsg.includes('invalid_image_id')) throw retryError;
+
+          // WooCommerce product itself has a broken image — clear all images
+          this.logger.warn({ event: 'woo_clearing_broken_images', sku: product.sku });
+          wooData.images = [];
+          const result = await wooService.updateProduct(wooProductId, wooData);
           return String(result.id);
         }
-        throw error;
       }
     } else {
       // Create new
