@@ -1050,8 +1050,11 @@ export class BiDirectionalSyncService {
 
   /**
    * Update inventory on platform
+   * @deprecated Use ProductSyncService.syncStockToChannel() instead.
+   * This method will be removed in a future version.
    */
   async updateInventoryOnPlatform(productId: string, channelId: string, stockQuantity: number): Promise<PushResult> {
+    console.warn('[BiDirectionalSync] DEPRECATED: updateInventoryOnPlatform() called. Use ProductSyncService.syncStockToChannel() instead.');
     try {
       const productChannel = await this.prisma.productChannel.findFirst({
         where: { productId, channelId },

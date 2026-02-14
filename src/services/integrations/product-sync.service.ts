@@ -684,6 +684,20 @@ export class ProductSyncService {
           duration: Date.now() - channelStartTime
         });
 
+        // Trigger pending stock sync after product is pushed to channel
+        // This handles the race condition where stock arrives before the product is created
+        if (externalId && (channelType === 'shopify' || channelType === 'woocommerce')) {
+          this.syncStockToChannel(product.id, productChannel.channel.id).catch(err => {
+            this.logger.warn({
+              jobId,
+              event: 'post_push_stock_sync_failed',
+              productId,
+              channelId: productChannel.channel.id,
+              error: err instanceof Error ? err.message : 'Unknown',
+            });
+          });
+        }
+
         results.push({ platform: channelType, success: true, externalId });
       } catch (error) {
         const errMsg = extractErrorMessage(error);
@@ -1067,7 +1081,7 @@ export class ProductSyncService {
       stockQuantity: available,
     });
 
-    if (result?.stock_quantity !== undefined && result.stock_quantity !== available) {
+    if (result?.stock_quantity != null && result.stock_quantity !== available) {
       this.logger.error({
         event: 'woocommerce_stock_verification_failed',
         expected: available,

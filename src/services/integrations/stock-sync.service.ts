@@ -133,6 +133,12 @@ export class StockSyncService {
       // This is the proper way to get stock levels for merchants
       const jtlProducts = await jtlService.getAllProductsWithStock();
 
+      this.syncLogger.getLogger().info({
+        event: 'jtl_stock_fetched',
+        clientId,
+        productsReturned: jtlProducts.length,
+      });
+
       if (jtlProducts.length === 0) {
         result.success = true;
         return result;
@@ -160,6 +166,13 @@ export class StockSyncService {
           reserved: true,
           announced: true,
         },
+      });
+
+      this.syncLogger.getLogger().info({
+        event: 'local_products_matched',
+        clientId,
+        localProductsFound: localProducts.length,
+        jtlProductsToSync: filteredProducts.length,
       });
 
       // Create a map for quick lookup by JFSKU
@@ -550,18 +563,33 @@ export class StockSyncService {
    */
   private async queueStockSyncToCommerce(productId: string): Promise<void> {
     try {
-      const queue = getQueue();
+      let queue;
+      try {
+        queue = getQueue();
+      } catch (error) {
+        this.syncLogger.getLogger().error({
+          event: 'queue_not_initialized',
+          productId,
+          error: error instanceof Error ? error.message : 'Unknown',
+        });
+        return;
+      }
+
       if (!queue) {
-        this.syncLogger.getLogger().warn({
+        this.syncLogger.getLogger().error({
           event: 'queue_unavailable',
-          productId
+          productId,
         });
         return;
       }
 
       // Get product channels to determine which platforms to sync to
       const productChannels = await this.prisma.productChannel.findMany({
-        where: { productId },
+        where: {
+          productId,
+          syncEnabled: true,
+          isActive: true,
+        },
         include: {
           channel: {
             select: {
@@ -573,40 +601,64 @@ export class StockSyncService {
         },
       });
 
+      this.syncLogger.getLogger().debug({
+        event: 'queue_stock_sync_channels',
+        productId,
+        channelsFound: productChannels.length,
+      });
+
       // Queue sync for each active channel
       for (const pc of productChannels) {
         if (!pc.channel.isActive) continue;
 
-        if (pc.channel.type === 'SHOPIFY') {
-          await queue.enqueue(
-            QUEUE_NAMES.PRODUCT_SYNC_TO_SHOPIFY,
-            {
-              productId,
-              channelId: pc.channel.id,
-              origin: 'jtl',
-              fieldsToSync: ['available', 'reserved'],
+        const queueName = pc.channel.type === 'SHOPIFY'
+          ? QUEUE_NAMES.PRODUCT_SYNC_TO_SHOPIFY
+          : pc.channel.type === 'WOOCOMMERCE'
+            ? QUEUE_NAMES.PRODUCT_SYNC_TO_WOOCOMMERCE
+            : null;
+
+        if (!queueName) continue;
+
+        const jobId = await queue.enqueue(
+          queueName,
+          {
+            productId,
+            channelId: pc.channel.id,
+            origin: 'jtl',
+            fieldsToSync: ['available', 'reserved'],
+          },
+          {
+            priority: 5, // Higher priority for stock updates
+            retryLimit: 3,
+            retryDelay: 30,
+          }
+        );
+
+        if (!jobId) {
+          this.syncLogger.getLogger().error({
+            event: 'queue_enqueue_failed',
+            productId,
+            channelId: pc.channel.id,
+            channelType: pc.channel.type,
+            queueName,
+          });
+
+          await this.prisma.productChannel.update({
+            where: { id: pc.id },
+            data: {
+              lastError: 'Failed to enqueue stock sync job',
+              lastErrorAt: new Date(),
+              syncStatus: 'ERROR',
             },
-            {
-              priority: 5, // Higher priority for stock updates
-              retryLimit: 3,
-              retryDelay: 30,
-            }
-          );
-        } else if (pc.channel.type === 'WOOCOMMERCE') {
-          await queue.enqueue(
-            QUEUE_NAMES.PRODUCT_SYNC_TO_WOOCOMMERCE,
-            {
-              productId,
-              channelId: pc.channel.id,
-              origin: 'jtl',
-              fieldsToSync: ['available', 'reserved'],
-            },
-            {
-              priority: 5,
-              retryLimit: 3,
-              retryDelay: 30,
-            }
-          );
+          }).catch(() => {});
+        } else {
+          this.syncLogger.getLogger().debug({
+            event: 'stock_sync_enqueued',
+            productId,
+            channelId: pc.channel.id,
+            channelType: pc.channel.type,
+            jobId,
+          });
         }
       }
     } catch (error) {
