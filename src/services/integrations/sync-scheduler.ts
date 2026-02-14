@@ -56,6 +56,13 @@ interface SchedulerConfig {
    * Default: 2 minutes (same as JTL poll - for near real-time stock updates)
    */
   inboundPollIntervalMinutes: number;
+
+  /**
+   * Interval for pushing paid-but-unsynced orders to JTL FFN in minutes
+   * Safety net for missed webhooks / failed queue jobs
+   * Default: 10 minutes
+   */
+  paidOrderSyncIntervalMinutes: number;
 }
 
 interface ChannelSyncState {
@@ -111,6 +118,7 @@ export class SyncScheduler {
   private stockSyncTimer?: NodeJS.Timeout;
   private inboundPollTimer?: NodeJS.Timeout;
   private commerceReconcileTimer?: NodeJS.Timeout;
+  private paidOrderSyncTimer?: NodeJS.Timeout;
   private stockSyncService: StockSyncService;
   private isRunning = false;
   private logger = new Logger('SyncScheduler');
@@ -123,6 +131,7 @@ export class SyncScheduler {
     tokenRefreshIntervalHours: 12,
     stockSyncIntervalMinutes: 15,
     inboundPollIntervalMinutes: 2,
+    paidOrderSyncIntervalMinutes: 10,
   };
 
   constructor(prisma: PrismaClient, config?: Partial<SchedulerConfig>) {
@@ -154,6 +163,7 @@ export class SyncScheduler {
     this.startStockSyncTimer();
     this.startInboundPollTimer();
     this.startCommerceReconcileTimer();
+    this.startPaidOrderSyncTimer();
 
     console.log('Sync scheduler started successfully');
     console.log(`- Incremental sync: every ${this.config.incrementalSyncIntervalMinutes} minutes`);
@@ -163,6 +173,7 @@ export class SyncScheduler {
     console.log(`- Stock sync (safety net): every ${this.config.stockSyncIntervalMinutes} minutes`);
     console.log(`- Inbound poll (stock trigger): every ${this.config.inboundPollIntervalMinutes} minutes`);
     console.log(`- Commerce reconcile: every 30 minutes`);
+    console.log(`- Paid order FFN sync: every ${this.config.paidOrderSyncIntervalMinutes} minutes`);
   }
 
   /**
@@ -209,6 +220,11 @@ export class SyncScheduler {
     if (this.commerceReconcileTimer) {
       clearInterval(this.commerceReconcileTimer);
       this.commerceReconcileTimer = undefined;
+    }
+
+    if (this.paidOrderSyncTimer) {
+      clearInterval(this.paidOrderSyncTimer);
+      this.paidOrderSyncTimer = undefined;
     }
 
     this.isRunning = false;
@@ -349,6 +365,157 @@ export class SyncScheduler {
       this.reconcileFailedCommerceSyncs();
       this.reconcileStuckFulfillments();
     }, intervalMs);
+  }
+
+  /**
+   * Start paid-but-unsynced order sweep timer
+   * Safety net: catches orders that are paid but never pushed to JTL FFN
+   * (e.g. missed webhooks, failed queue jobs, hold-release flow didn't fire)
+   */
+  private startPaidOrderSyncTimer(): void {
+    const intervalMs = this.config.paidOrderSyncIntervalMinutes * 60 * 1000;
+
+    // First run after 3 minute delay (let other services initialize)
+    setTimeout(() => {
+      this.pushPaidUnsyncedOrdersToFFN();
+    }, 3 * 60 * 1000);
+
+    this.paidOrderSyncTimer = setInterval(() => {
+      this.pushPaidUnsyncedOrdersToFFN();
+    }, intervalMs);
+  }
+
+  /**
+   * Find paid orders that were never synced to JTL FFN and enqueue them.
+   * Excludes replacement orders (must be synced manually via force).
+   * Downstream syncOrderToFFN() re-validates payment status as defense-in-depth.
+   */
+  async pushPaidUnsyncedOrdersToFFN(): Promise<{ found: number; queued: number; skipped: number; errors: number }> {
+    const jobId = generateJobId('paid-order-ffn-sync');
+    const startTime = Date.now();
+    const stats = { found: 0, queued: 0, skipped: 0, errors: 0 };
+
+    const SAFE_PAYMENT_STATUSES = [
+      'paid', 'completed', 'processing', 'refunded',
+      'partially_refunded', 'authorized', 'partially_paid',
+    ];
+
+    this.logger.debug({
+      jobId,
+      event: 'job_started',
+      operation: 'paidOrderFFNSync',
+      type: 'safety_net',
+    });
+
+    try {
+      // Find orders that are paid but never pushed to FFN
+      // Uses raw SQL because we need complex OR logic on hold conditions
+      const unsyncedOrders = await this.prisma.$queryRawUnsafe<
+        Array<{ id: string; orderId: string; orderNumber: string | null; paymentStatus: string }>
+      >(`
+        SELECT o."id", o."orderId", o."orderNumber", o."paymentStatus"
+        FROM "Order" o
+        JOIN "Channel" c ON o.channel_id = c.id
+        WHERE o."jtlOutboundId" IS NULL
+          AND o."paymentStatus" IN (${SAFE_PAYMENT_STATUSES.map((_, i) => `$${i + 1}`).join(', ')})
+          AND o."isReplacement" = false
+          AND o."isCancelled" = false
+          AND (
+            o."isOnHold" = false
+            OR o."holdReason" NOT IN ('AWAITING_PAYMENT', 'SHIPPING_METHOD_MISMATCH')
+            OR o."paymentHoldOverride" = true
+          )
+          AND c."isActive" = true
+          AND c."syncEnabled" = true
+        ORDER BY o."createdAt" ASC
+        LIMIT 50
+      `, ...SAFE_PAYMENT_STATUSES);
+
+      stats.found = unsyncedOrders.length;
+
+      if (unsyncedOrders.length === 0) {
+        this.logger.debug({
+          jobId,
+          event: 'job_completed',
+          operation: 'paidOrderFFNSync',
+          duration: Date.now() - startTime,
+          ...stats,
+        });
+        return stats;
+      }
+
+      this.logger.info({
+        jobId,
+        event: 'paid_unsynced_orders_found',
+        count: unsyncedOrders.length,
+        orders: unsyncedOrders.map(o => o.orderNumber || o.orderId),
+      });
+
+      const queue = getQueue();
+
+      for (const order of unsyncedOrders) {
+        try {
+          const enqueuedJobId = await queue.enqueue<OrderSyncJobData>(
+            QUEUE_NAMES.ORDER_SYNC_TO_FFN,
+            {
+              orderId: order.id,
+              origin: 'nolimits',
+              operation: 'create',
+            },
+            {
+              singletonKey: `ffn-sync-${order.id}`,
+              retryLimit: 3,
+              retryDelay: 60,
+              retryBackoff: true,
+              expireInSeconds: 3600,
+              priority: -1, // Lower priority than real-time webhook-driven jobs
+            }
+          );
+
+          if (enqueuedJobId) {
+            stats.queued++;
+            this.logger.debug({
+              jobId,
+              event: 'order_enqueued_for_ffn',
+              orderId: order.id,
+              orderNumber: order.orderNumber,
+              paymentStatus: order.paymentStatus,
+              pgBossJobId: enqueuedJobId,
+            });
+          } else {
+            stats.skipped++; // singletonKey duplicate — job already active
+          }
+        } catch (enqueueError) {
+          stats.errors++;
+          this.logger.warn({
+            jobId,
+            event: 'order_enqueue_failed',
+            orderId: order.id,
+            orderNumber: order.orderNumber,
+            error: enqueueError instanceof Error ? enqueueError.message : 'Unknown error',
+          });
+        }
+      }
+
+      this.logger.info({
+        jobId,
+        event: 'job_completed',
+        operation: 'paidOrderFFNSync',
+        duration: Date.now() - startTime,
+        ...stats,
+      });
+    } catch (error) {
+      this.logger.error({
+        jobId,
+        event: 'job_failed',
+        operation: 'paidOrderFFNSync',
+        duration: Date.now() - startTime,
+        error: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined,
+      });
+    }
+
+    return stats;
   }
 
   /**

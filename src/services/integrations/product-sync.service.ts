@@ -839,7 +839,10 @@ export class ProductSyncService {
       reserved?: number;
     } = {}
   ): Promise<{ success: boolean; error?: string }> {
-    console.log(`[ProductSync] Syncing stock for product ${productId} to channel ${channelId}`);
+    const startTime = Date.now();
+    const jobId = generateJobId('stock-sync');
+
+    this.logger.debug({ jobId, event: 'stock_sync_started', productId, channelId });
 
     try {
       // Get product with channel info
@@ -864,13 +867,37 @@ export class ProductSyncService {
       });
 
       if (!productChannel) {
-        console.log(`[ProductSync] No active channel found for product ${productId}, channel ${channelId}`);
+        this.logger.debug({
+          jobId,
+          event: 'stock_sync_no_active_channel',
+          productId,
+          channelId,
+        });
         return { success: true }; // Not an error, just no channel to sync to
       }
 
       if (!productChannel.externalProductId) {
-        console.log(`[ProductSync] Product ${productId} not yet synced to channel ${channelId}, skipping stock sync`);
-        return { success: true }; // Product hasn't been pushed to channel yet
+        this.logger.warn({
+          event: 'stock_sync_pending_product_push',
+          reason: 'missing_external_id',
+          productId,
+          channelId,
+          sku: productChannel.product.sku,
+        });
+
+        await this.prisma.productChannel.update({
+          where: { id: productChannel.id },
+          data: {
+            lastError: 'Product not yet pushed to channel - stock sync pending',
+            lastErrorAt: new Date(),
+            syncStatus: 'PENDING',
+          },
+        });
+
+        return {
+          success: false,
+          error: 'Product not yet pushed to channel - will retry',
+        };
       }
 
       const stockToSync = options.available ?? productChannel.product.available;
@@ -901,11 +928,48 @@ export class ProductSyncService {
         data: { lastSyncAt: new Date() },
       });
 
-      console.log(`[ProductSync] Stock synced successfully for product ${productId} to ${productChannel.channel.type}`);
+      // Clear any previous errors on success
+      await this.prisma.productChannel.update({
+        where: { id: productChannel.id },
+        data: {
+          syncStatus: 'SYNCED',
+          lastError: null,
+          lastErrorAt: null,
+        },
+      });
+
+      this.logger.info({
+        jobId,
+        event: 'stock_sync_completed',
+        productId,
+        channelId,
+        channelType: productChannel.channel.type,
+        stockSynced: stockToSync,
+        duration: Date.now() - startTime,
+      });
+
       return { success: true };
     } catch (error) {
       const errorMessage = extractErrorMessage(error);
-      console.error(`[ProductSync] Stock sync failed for product ${productId}:`, errorMessage);
+      this.logger.error({
+        jobId,
+        event: 'stock_sync_failed',
+        productId,
+        channelId,
+        error: errorMessage,
+        duration: Date.now() - startTime,
+      });
+
+      // Track error on ProductChannel
+      await this.prisma.productChannel.updateMany({
+        where: { productId, channelId },
+        data: {
+          lastError: errorMessage,
+          lastErrorAt: new Date(),
+          syncStatus: 'ERROR',
+        },
+      }).catch(() => {});
+
       return { success: false, error: errorMessage };
     }
   }
@@ -950,7 +1014,27 @@ export class ProductSyncService {
 
     // Set inventory level
     await shopifyService.setInventoryLevel(inventoryItemId, locationId, available);
-    console.log(`[ProductSync] Set Shopify inventory: item=${inventoryItemId}, location=${locationId}, available=${available}`);
+
+    this.logger.info({
+      event: 'shopify_inventory_updated',
+      productId: externalProductId,
+      inventoryItemId,
+      locationId,
+      available,
+    });
+
+    // Verify the update took effect
+    const verifyProduct = await shopifyService.getProduct(productId);
+    const actualQuantity = verifyProduct?.variants?.[0]?.inventory_quantity;
+    if (actualQuantity !== undefined && actualQuantity !== available) {
+      this.logger.error({
+        event: 'shopify_inventory_verification_failed',
+        expected: available,
+        actual: actualQuantity,
+        productId: externalProductId,
+      });
+      throw new Error(`Inventory verification failed: expected ${available}, got ${actualQuantity}`);
+    }
   }
 
   /**
@@ -975,8 +1059,23 @@ export class ProductSyncService {
     });
 
     const productId = parseInt(externalProductId);
-    await wooService.updateProductStock(productId, available, true);
-    console.log(`[ProductSync] Set WooCommerce stock: product=${productId}, stock_quantity=${available}`);
+    const result = await wooService.updateProductStock(productId, available, true);
+
+    this.logger.info({
+      event: 'woocommerce_stock_updated',
+      productId: externalProductId,
+      stockQuantity: available,
+    });
+
+    if (result?.stock_quantity !== undefined && result.stock_quantity !== available) {
+      this.logger.error({
+        event: 'woocommerce_stock_verification_failed',
+        expected: available,
+        actual: result.stock_quantity,
+        productId: externalProductId,
+      });
+      throw new Error(`Stock verification failed: expected ${available}, got ${result.stock_quantity}`);
+    }
   }
 
   /**
