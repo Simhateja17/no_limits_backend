@@ -18,6 +18,7 @@
     "migrate:encrypt:execute": "npx tsx scripts/encrypt-sensitive-data.ts --execute",
     "migrate:encrypt:backup": "npx tsx scripts/encrypt-sensitive-data.ts --backup --execute",
     "sync:shipping-methods": "npx tsx scripts/sync-shipping-for-existing-clients.ts",
+    "sync:stock-to-channels": "npx tsx scripts/sync-stock-to-channels.ts",
     "stress:quick": "npx tsx stress-tests/scripts/orchestrator.ts --quick",
     "stress:low": "npx tsx stress-tests/scripts/orchestrator.ts low",
     "stress:medium": "npx tsx stress-tests/scripts/orchestrator.ts medium",
