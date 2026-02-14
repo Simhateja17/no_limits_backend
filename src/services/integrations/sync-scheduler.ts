@@ -1794,24 +1794,17 @@ export class SyncScheduler {
     error?: string;
   }): Promise<void> {
     try {
+      const data = {
+        lastRunAt: new Date(),
+        success: result.success,
+        duration: result.duration,
+        details: result.details ? JSON.parse(JSON.stringify(result.details)) : undefined,
+        error: result.error || null,
+      };
       await this.prisma.cronJobStatus.upsert({
         where: { clientId_jobName: { clientId, jobName } },
-        create: {
-          clientId,
-          jobName,
-          lastRunAt: new Date(),
-          success: result.success,
-          duration: result.duration,
-          details: result.details || undefined,
-          error: result.error || null,
-        },
-        update: {
-          lastRunAt: new Date(),
-          success: result.success,
-          duration: result.duration,
-          details: result.details || undefined,
-          error: result.error || null,
-        },
+        create: { clientId, jobName, ...data },
+        update: data,
       });
     } catch { /* don't let status tracking break the actual job */ }
   }
