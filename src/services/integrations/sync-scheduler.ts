@@ -414,8 +414,8 @@ export class SyncScheduler {
         Array<{ id: string; orderId: string; orderNumber: string | null; paymentStatus: string }>
       >(`
         SELECT o."id", o."orderId", o."orderNumber", o."paymentStatus"
-        FROM "Order" o
-        JOIN "Channel" c ON o.channel_id = c.id
+        FROM "orders" o
+        JOIN "channels" c ON o.channel_id = c.id
         WHERE o."jtlOutboundId" IS NULL
           AND o."paymentStatus" IN (${SAFE_PAYMENT_STATUSES.map((_, i) => `$${i + 1}`).join(', ')})
           AND o."isReplacement" = false
