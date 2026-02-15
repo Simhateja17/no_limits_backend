@@ -8,6 +8,7 @@ import { prisma } from '../config/database.js';
 import { authenticate } from '../middleware/auth.js';
 import { getQueue, QUEUE_NAMES } from '../services/queue/sync-queue.service.js';
 import { enrichProductWithPossibleQuantity } from '../utils/bundle-calculator.js';
+import { ProductSyncService } from '../services/integrations/index.js';
 
 const router = Router();
 
@@ -4148,6 +4149,90 @@ router.get('/health-status', async (req: Request, res: Response) => {
     res.status(500).json({
       success: false,
       error: error.message || 'Failed to fetch health status',
+    });
+  }
+});
+
+/**
+ * POST /api/data/products/:id/sync-stock
+ * Sync product stock to one or all linked channels
+ * Body: { channelId?: string } — if omitted, syncs to all active channels
+ */
+router.post('/products/:id/sync-stock', async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).userId;
+    const { id } = req.params;
+    const { channelId } = req.body || {};
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      include: { client: true },
+    });
+
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+
+    // Only ADMIN/EMPLOYEE can trigger stock sync
+    if (user.role === 'CLIENT') {
+      return res.status(403).json({ success: false, error: 'Unauthorized' });
+    }
+
+    // Fetch product with its channels
+    const product = await prisma.product.findUnique({
+      where: { id },
+      include: {
+        channels: {
+          where: { isActive: true, syncEnabled: true },
+          include: {
+            channel: { select: { id: true, name: true, type: true } },
+          },
+        },
+      },
+    });
+
+    if (!product) {
+      return res.status(404).json({ success: false, error: 'Product not found' });
+    }
+
+    // Filter to specific channel if requested
+    const channelsToSync = channelId
+      ? product.channels.filter(pc => pc.channelId === channelId)
+      : product.channels;
+
+    if (channelsToSync.length === 0) {
+      return res.json({
+        success: true,
+        results: [],
+        message: channelId ? 'Channel not found or not active' : 'No active channels to sync',
+      });
+    }
+
+    const productSyncService = new ProductSyncService(prisma);
+    const results = [];
+
+    for (const pc of channelsToSync) {
+      const result = await productSyncService.syncStockToChannel(product.id, pc.channelId, {
+        available: product.available,
+      });
+      results.push({
+        channelId: pc.channelId,
+        channelName: pc.channel.name,
+        channelType: pc.channel.type,
+        success: result.success,
+        error: result.error,
+      });
+    }
+
+    res.json({
+      success: true,
+      results,
+    });
+  } catch (error) {
+    console.error('Error syncing product stock:', error);
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Failed to sync product stock',
     });
   }
 });
