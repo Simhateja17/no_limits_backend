@@ -4173,11 +4173,6 @@ router.post('/products/:id/sync-stock', async (req: Request, res: Response) => {
       return res.status(404).json({ success: false, error: 'User not found' });
     }
 
-    // Only ADMIN/EMPLOYEE can trigger stock sync
-    if (user.role === 'CLIENT') {
-      return res.status(403).json({ success: false, error: 'Unauthorized' });
-    }
-
     // Fetch product with its channels
     const product = await prisma.product.findUnique({
       where: { id },
@@ -4193,6 +4188,11 @@ router.post('/products/:id/sync-stock', async (req: Request, res: Response) => {
 
     if (!product) {
       return res.status(404).json({ success: false, error: 'Product not found' });
+    }
+
+    // CLIENT users can only sync their own products
+    if (user.role === 'CLIENT' && product.clientId !== user.client?.id) {
+      return res.status(403).json({ success: false, error: 'Unauthorized' });
     }
 
     // Filter to specific channel if requested

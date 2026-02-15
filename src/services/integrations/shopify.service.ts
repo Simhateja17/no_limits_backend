@@ -270,6 +270,16 @@ export class ShopifyService {
   }
 
   /**
+   * Fetch a single variant by ID
+   */
+  async getVariant(variantId: number): Promise<ShopifyVariant> {
+    const response = await this.request<{ variant: ShopifyVariant }>(
+      `/variants/${variantId}.json`
+    );
+    return response.variant;
+  }
+
+  /**
    * Get products updated since a specific date
    */
   async getProductsUpdatedSince(since: Date): Promise<ShopifyProduct[]> {
